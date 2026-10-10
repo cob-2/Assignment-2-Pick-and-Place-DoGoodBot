@@ -2,7 +2,7 @@ import swift
 import roboticstoolbox as rtb
 from math import pi
 from spatialmath import SE3
-from RS007N.RS007N import RS007N
+from Kawasaki_RS007N.Kawasaki import RS007N
 
 env = swift.Swift()
 env.launch(realtime=True)

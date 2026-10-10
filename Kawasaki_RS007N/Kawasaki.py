@@ -1,13 +1,3 @@
-##  @file
-#   @brief Kawasaki RS007N defined by standard DH parameters, with 3D meshes
-#
-#   Kinematics and meshes come from Kawasaki's official ROS package
-#   (github.com/Kawasaki-Robotics/khi_robot, khi_rs_description, BSD licence).
-#   The DH table below reproduces that URDF exactly, so a joint angle here is
-#   the same as the joint angle on the real controller (JT1..JT6).
-#
-#   q = [0,0,0,0,0,0] is the robot standing straight up.
-
 import os
 import time
 from math import pi, radians
