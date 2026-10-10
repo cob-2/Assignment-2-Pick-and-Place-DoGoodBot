@@ -65,7 +65,6 @@ class RS007N(DHRobot3D):
 
     # -------------------------------------------------------------------------
     def _create_DH(self):
-        """Standard DH for the Kawasaki RS007N (lengths in metres)."""
         d      = [0.360,  0.0,   0.0,    0.375, 0.0,    0.078]
         a      = [0.0,    0.355, 0.0,    0.0,   0.0,    0.0]
         alpha  = [pi/2,   pi,    -pi/2,  pi/2,  -pi/2,  0.0]
