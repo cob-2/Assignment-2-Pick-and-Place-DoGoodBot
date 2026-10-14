@@ -1,6 +1,3 @@
-# Virtual environment - each person creates their own, it is not source code.
-# A venv has absolute paths baked into Scripts\*.exe and pyvenv.cfg, so a
-# committed one cannot run on anybody else's machine anyway.
 .venv/
 venv/
 env/
