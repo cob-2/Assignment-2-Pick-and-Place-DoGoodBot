@@ -1,0 +1,41 @@
+{
+    // Working directory is pinned to the repo root: Swift resolves mesh paths
+    // against the drive Python runs from, so running from models\ or another
+    // drive makes meshes disappear. See SETUP.md.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Card Vault scene",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}\\card_vault_scene.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "COBOTTA teach pendant",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}\\cobotta_test.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "UR3e + RG2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "models.ur3e_rg2",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Current file (repo root cwd)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}

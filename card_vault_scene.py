@@ -73,6 +73,8 @@ def load_robot(loader):
         module = importlib.import_module(module_name)
         return getattr(module, class_name)()
     except Exception as exc:
+        # A grey block in the scene means the import above failed - read the
+        # reason here rather than wondering why an arm looks wrong.
         print(f"  [placeholder] {loader} not available ({type(exc).__name__}: {exc})")
         return None
 

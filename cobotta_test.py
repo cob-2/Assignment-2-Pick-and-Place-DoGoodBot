@@ -17,6 +17,8 @@ try:
 except ImportError:
     from ir_support import DHRobot3D
 
+from models.grippers import DensoParallelHand, GripperedArm
+
 
 # ----------------------------------------------------------------------------
 # DH TABLE
@@ -68,8 +70,11 @@ QTEST_TRANSFORMS = [
 # ----------------------------------------------------------------------------
 # ROBOT
 # ----------------------------------------------------------------------------
-class COBOTTA(DHRobot3D):
-    def __init__(self, base=SE3()):
+class COBOTTA(GripperedArm, DHRobot3D):
+    """COBOTTA with its parallel hand fitted. fkine() returns the fingertip
+    plane, 60 mm past the flange; flange_pose() returns the bare flange."""
+
+    def __init__(self, base=SE3(), gripper=True):
         super().__init__(
             cobotta_links(),
             link3D_names=LINK3D_NAMES,
@@ -80,6 +85,8 @@ class COBOTTA(DHRobot3D):
         )
         self.base = base
         self.q = np.array(QTEST, dtype=float)
+        if gripper:
+            self._attach_gripper(DensoParallelHand(MESH_DIR))
 
 
 # ----------------------------------------------------------------------------
@@ -87,6 +94,9 @@ class COBOTTA(DHRobot3D):
 # ----------------------------------------------------------------------------
 # Denso's parallel hand: both fingers slide along the flange y axis,
 # 0 to 15 mm each, mirrored. Meshes sit in the flange frame.
+#
+# COBOTTA now carries models.grippers.DensoParallelHand itself, so nothing here
+# needs this class; it is kept as a standalone way to draw the hand on its own.
 GRIPPER_STROKE = 0.015
 
 
@@ -141,15 +151,14 @@ def verify_dh(samples=200):
 def main():
     verify_dh()
 
-    robot = COBOTTA()
-    gripper = ParallelGripper()
+    robot = COBOTTA()                      # the hand comes with it
 
     env = swift.Swift()
     env.launch(realtime=True)
     robot.add_to_env(env)
-    gripper.add_to_env(env)
 
-    state = dict(q=np.array(QTEST, dtype=float), grip=GRIPPER_STROKE, dirty=True)
+    state = dict(q=np.array(QTEST, dtype=float),
+                 grip=robot.gripper.max_opening, dirty=True)
 
     def joint_cb(index):
         def cb(value):
@@ -167,21 +176,21 @@ def main():
     for i, (lo, hi) in enumerate(QLIM_DEG):
         env.add(swift.Slider(joint_cb(i), min=lo, max=hi, step=1,
                              value=float(np.rad2deg(state["q"][i])),
-                             desc=f"q{i + 1}", unit="&#176;"))
+                             label=f"q{i + 1}", unit="&#176;"))
 
-    env.add(swift.Slider(grip_cb, min=0, max=GRIPPER_STROKE * 1000, step=0.5,
-                         value=GRIPPER_STROKE * 1000, desc="gripper", unit="mm"))
+    max_gap = robot.gripper.max_opening * 1000
+    env.add(swift.Slider(grip_cb, min=0, max=max_gap, step=0.5,
+                         value=max_gap, label="jaw gap", unit="mm"))
 
     def refresh():
         robot.q = state["q"]
-        robot._update_3dmodel()
+        robot.set_gripper(state["grip"])
         T = robot.fkine(state["q"])
-        gripper.update(T, state["grip"])
         p = T.t
         rpy = np.rad2deg(T.rpy())
-        readout.desc = (f"TCP  x {p[0]:+.3f}  y {p[1]:+.3f}  z {p[2]:+.3f} m   |   "
-                        f"rpy {rpy[0]:+.1f} {rpy[1]:+.1f} {rpy[2]:+.1f} deg   |   "
-                        f"grip {state['grip'] * 1000:.1f} mm")
+        readout.label = (f"TCP  x {p[0]:+.3f}  y {p[1]:+.3f}  z {p[2]:+.3f} m   |   "
+                         f"rpy {rpy[0]:+.1f} {rpy[1]:+.1f} {rpy[2]:+.1f} deg   |   "
+                         f"jaw gap {state['grip'] * 1000:.1f} mm")
 
     refresh()
     while True:

@@ -319,6 +319,57 @@ def transfer_grasp_xyz(depth=0.030):
 
 
 # ----------------------------------------------------------------------------
+# SLAB MOUNTS: slotted stands that hold a slab upright where it is set down
+# ----------------------------------------------------------------------------
+# Shelf plus two ribs. The slab stands on the shelf, the ribs stop it toppling,
+# and the gripper takes it from the top edge well above them. Seen end on:
+#
+#     ||   ||     <- ribs, 30 mm tall
+#     || | ||        | = slab in the slot
+#   __||_|_||__
+#  |___________|  <- shelf
+#
+# Add or move a mount by editing MOUNT["at"]: the key is the mount name and the
+# value is the point the shelf sits on (usually the top face of a nest).
+MOUNT = dict(
+    shelf=(0.100, 0.044, 0.008),        # x, y, z of the shelf pad
+    rib=(0.100, 0.005, 0.030),          # x, y, z of one rib
+    slot_clearance=0.0015,              # rib face to slab face, each side
+    at=dict(inspection=(-0.05, -0.05, BENCH_H + 0.012),   # on the inspection nest
+            packing=(-0.25, -0.05, BENCH_H + 0.012)),     # on the bag tray
+)
+MOUNT["slot_y"] = SLAB["t"] / 2 + MOUNT["slot_clearance"] + MOUNT["rib"][1] / 2
+
+
+def _mount_specs():
+    """Three cuboids per mount: shelf pad, then a rib either side of the slot."""
+    sx, sy, sz = MOUNT["shelf"]
+    rx, ry, rz = MOUNT["rib"]
+    out = []
+    for name, (x, y, z) in MOUNT["at"].items():
+        out.append(dict(name=f"mount_{name}_shelf", group="mounts", type="cuboid",
+                        size=(sx, sy, sz), xyz=(x, y, z + sz / 2), color=C["rack"]))
+        for tag, side in (("py", 1), ("my", -1)):
+            out.append(dict(name=f"mount_{name}_rib_{tag}", group="mounts", type="cuboid",
+                            size=(rx, ry, rz),
+                            xyz=(x, y + side * MOUNT["slot_y"], z + sz + rz / 2),
+                            color=C["rack"]))
+    return out
+
+
+def mount_slab_xyz(name):
+    """Centre of a slab standing in that mount."""
+    x, y, z = MOUNT["at"][name]
+    return (x, y, z + MOUNT["shelf"][2] + SLAB["h"] / 2)
+
+
+def mount_grasp_xyz(name, depth=0.030):
+    """Point between the gripper fingers for a slab in that mount."""
+    x, y, z = mount_slab_xyz(name)
+    return (x, y, z + SLAB["h"] / 2 - depth)
+
+
+# ----------------------------------------------------------------------------
 # ROBOT BAY: bench extension under Arm A, warning tape on the floor around it
 # ----------------------------------------------------------------------------
 def _bay_specs():
@@ -347,6 +398,7 @@ def _bay_specs():
 
 
 STATIC.extend(_transfer_specs())
+STATIC.extend(_mount_specs())
 STATIC.extend(_bay_specs())
 
 SHOW_MARKERS = False
@@ -442,8 +494,8 @@ ROBOTS = {
     "B_inspect": dict(label="Arm B - inspect and pack (Denso COBOTTA)",
                       loader="cobotta_test:COBOTTA", base_xyz=(-0.12, 0.18, BENCH_H),
                       base_rpy=(0, 0, -pi / 2), q0=None, placeholder_h=0.30),
-    "D_show": dict(label="UR3e - showcase and outfeed (also the real robot)",
-                   loader="ir_support:UR3e", base_xyz=(0.30, -0.22, BENCH_H),
+    "D_show": dict(label="UR3e + RG2 - showcase and outfeed (also the real robot)",
+                   loader="models.ur3e_rg2:UR3eRG2", base_xyz=(0.30, -0.22, BENCH_H),
                    base_rpy=(0, 0, pi / 2), q0=UR3E_HOME, placeholder_h=0.40),
 }
 
@@ -458,6 +510,8 @@ FRAMES = dict(
     rack_middle=(RACK["centre_x"], RACK["rack_y"][1], BENCH_H + RACK["base_h"] + SLAB["h"]),
     rack_back=(RACK["centre_x"], RACK["rack_y"][2], BENCH_H + RACK["base_h"] + SLAB["h"]),
     inspection_nest=(-0.05, -0.05, BENCH_H + 0.02),
+    inspection_mount=mount_slab_xyz("inspection"),
+    packing_mount=mount_slab_xyz("packing"),
     camera=(-0.05, -0.05, 1.35),
     bag_tray=(-0.25, -0.05, BENCH_H + 0.02),
     mailer=(-0.22, 0.12, BENCH_H + 0.05),

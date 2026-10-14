@@ -1,0 +1,24 @@
+# Virtual environment - each person creates their own, it is not source code.
+# A venv has absolute paths baked into Scripts\*.exe and pyvenv.cfg, so a
+# committed one cannot run on anybody else's machine anyway.
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build and packaging
+*.egg-info/
+build/
+dist/
+
+# Editor and OS clutter
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
