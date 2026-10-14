@@ -19,6 +19,7 @@ CELL_D = 1.20          # y  (was 1.00 - back wall moved out 0.20 to clear Arm A)
 FRONT_Y = -0.50        # front glass (customer side) - unchanged
 BACK_Y = FRONT_Y + CELL_D   # back glass / restock door
 CELL_YC = (FRONT_Y + BACK_Y) / 2   # centre of the table and case in y
+CASE_X1 = CELL_W / 2 - 0.10   # right side of the glass case (pulled in 0.10 so Arm A, outside, reaches the hand-off)
 BENCH_H = 0.90         # table top height
 GLASS_H = 1.20         # enclosure height above the bench
 PANEL_T = 0.012        # panel thickness
@@ -52,7 +53,21 @@ C = {
     "keepout":   (0.95, 0.75, 0.10, 0.35),
     "target":    (0.20, 0.85, 0.80, 0.45),
     "pedestal":  (0.22, 0.24, 0.28, 1.0),
+    "tape":      (0.98, 0.82, 0.08, 1.0),
 }
+
+# ----------------------------------------------------------------------------
+# ARM A ROBOT BAY (outside the right glass, behind the customer panel)
+# ----------------------------------------------------------------------------
+ARM_A_BASE = (CASE_X1 + 0.10, 0.15, BENCH_H)   # Kawasaki base, on the bench extension
+PORT_MARGIN = 0.05                             # glass left around the arm opening, at the roof and side walls
+ARM_PORT = dict(                               # opening in the right glass: y range, height above bench
+    y0=FRONT_Y + 1.5 * PANEL_T + PORT_MARGIN,              # 5 cm from the front glass
+    y1=BACK_Y - 1.5 * PANEL_T - PORT_MARGIN,               # 5 cm from the back glass
+    h=GLASS_H - PANEL_T / 2 - PORT_MARGIN,                 # 5 cm below the roof
+)
+BAY_BENCH_Y = (-0.10, 0.50)                    # bench extension under Arm A: y range
+BAY = dict(x1=1.20, y0=-0.25, y1=0.65)         # floor warning tape around Arm A: right side x, front y, back y
 
 # ----------------------------------------------------------------------------
 # STATIC OBJECTS
@@ -76,22 +91,32 @@ STATIC = [
 
     # --- enclosure --------------------------------------------------------
     dict(name="glass_front", group="enclosure", type="cuboid",
-         size=(CELL_W, PANEL_T, GLASS_H), xyz=(0, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
+         size=(CASE_X1 + CELL_W / 2, PANEL_T, GLASS_H),
+         xyz=((CASE_X1 - CELL_W / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
          color=C["glass"]),
     dict(name="glass_left", group="enclosure", type="cuboid",
          size=(PANEL_T, CELL_D, GLASS_H), xyz=(-CELL_W / 2 + PANEL_T, CELL_YC, BENCH_H + GLASS_H / 2),
          color=C["glass"]),
-    dict(name="glass_right", group="enclosure", type="cuboid",
-         size=(PANEL_T, CELL_D, GLASS_H), xyz=(CELL_W / 2 - PANEL_T, CELL_YC, BENCH_H + GLASS_H / 2),
-         color=C["glass"]),
+    # right glass: pulled in to CASE_X1, with an opening (ARM_PORT) for Arm A to reach through
+    dict(name="glass_right_front", group="enclosure", type="cuboid",
+         size=(PANEL_T, ARM_PORT["y0"] - FRONT_Y, GLASS_H),
+         xyz=(CASE_X1 - PANEL_T, (FRONT_Y + ARM_PORT["y0"]) / 2, BENCH_H + GLASS_H / 2), color=C["glass"]),
+    dict(name="glass_right_back", group="enclosure", type="cuboid",
+         size=(PANEL_T, BACK_Y - ARM_PORT["y1"], GLASS_H),
+         xyz=(CASE_X1 - PANEL_T, (ARM_PORT["y1"] + BACK_Y) / 2, BENCH_H + GLASS_H / 2), color=C["glass"]),
+    dict(name="glass_right_top", group="enclosure", type="cuboid",
+         size=(PANEL_T, ARM_PORT["y1"] - ARM_PORT["y0"], GLASS_H - ARM_PORT["h"]),
+         xyz=(CASE_X1 - PANEL_T, (ARM_PORT["y0"] + ARM_PORT["y1"]) / 2,
+              BENCH_H + (ARM_PORT["h"] + GLASS_H) / 2), color=C["glass"]),
     dict(name="glass_back", group="enclosure", type="cuboid",
          size=(CELL_W - 0.62, PANEL_T, GLASS_H), xyz=(-0.31, BACK_Y - PANEL_T, BENCH_H + GLASS_H / 2),
          color=C["glass"]),
     dict(name="restock_door", group="safety", type="cuboid",
-         size=(0.60, PANEL_T, GLASS_H), xyz=(0.48, BACK_Y - PANEL_T, BENCH_H + GLASS_H / 2),
+         size=(CASE_X1 - 0.18, PANEL_T, GLASS_H), xyz=((0.18 + CASE_X1) / 2, BACK_Y - PANEL_T, BENCH_H + GLASS_H / 2),
          color=C["door"]),
     dict(name="roof", group="enclosure", type="cuboid",
-         size=(CELL_W, CELL_D, PANEL_T), xyz=(0, CELL_YC, BENCH_H + GLASS_H), color=C["frame"]),
+         size=(CASE_X1 + CELL_W / 2, CELL_D, PANEL_T), xyz=((CASE_X1 - CELL_W / 2) / 2, CELL_YC, BENCH_H + GLASS_H),
+         color=C["frame"]),
 
     # --- vault card stands: generated from RACK below (see _rack_specs) ----
 
@@ -111,8 +136,7 @@ STATIC = [
          size=(0.14, 0.10, 0.012), xyz=(-0.25, -0.05, BENCH_H + 0.006), color=C["nest"]),
     dict(name="mailer_box", group="pack", type="cuboid",
          size=(0.16, 0.10, 0.04), xyz=(-0.22, 0.12, BENCH_H + 0.02), color=C["mailer"]),
-    dict(name="transfer_nest", group="pack", type="cuboid",
-         size=(0.12, 0.12, 0.012), xyz=(0.05, 0.00, BENCH_H + 0.006), color=C["nest"]),
+    # transfer_nest (hand-off from Arm A to the COBOTTA): generated below as a one-slab holder
 
     # --- outfeed chute through the front wall -----------------------------
     dict(name="chute_sill", group="hatch", type="cuboid",
@@ -180,22 +204,22 @@ STATIC = [
     dict(name="curtain_beam", group="safety", type="cuboid",
          size=(0.006, 0.32, 0.006), xyz=(-0.92, CONV_Y, CONV_TOP + 0.17), color=C["beam"]),
     dict(name="estop_staff", group="safety", type="cylinder",
-         radius=0.026, length=0.03, xyz=(0.70, BACK_Y + 0.01, BENCH_H + 0.12), rpy=(pi / 2, 0, 0),
+         radius=0.026, length=0.03, xyz=(0.60, BACK_Y + 0.01, BENCH_H + 0.12), rpy=(pi / 2, 0, 0),
          color=C["stop"]),
     dict(name="stacklight_post", group="safety", type="cylinder",
-         radius=0.010, length=0.10, xyz=(0.72, 0.42, BENCH_H + GLASS_H + 0.05), color=C["frame"]),
+         radius=0.010, length=0.10, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.05), color=C["frame"]),
     dict(name="stacklight_green", group="safety", type="cylinder",
-         radius=0.030, length=0.05, xyz=(0.72, 0.42, BENCH_H + GLASS_H + 0.13), color=C["go"]),
+         radius=0.030, length=0.05, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.13), color=C["go"]),
     dict(name="stacklight_amber", group="safety", type="cylinder",
-         radius=0.030, length=0.05, xyz=(0.72, 0.42, BENCH_H + GLASS_H + 0.18), color=C["warn"]),
+         radius=0.030, length=0.05, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.18), color=C["warn"]),
     dict(name="stacklight_red", group="safety", type="cylinder",
-         radius=0.030, length=0.05, xyz=(0.72, 0.42, BENCH_H + GLASS_H + 0.23), color=C["stop"]),
+         radius=0.030, length=0.05, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.23), color=C["stop"]),
     dict(name="keepout_zone", group="safety", type="cuboid",
          size=(1.00, 0.45, 0.004), xyz=(0.35, BACK_Y + 0.28, 0.022), color=C["keepout"]),
 
     # --- pose markers (set SHOW_MARKERS = False to hide) -------------------
     dict(name="display_pose_marker", group="markers", type="cuboid",
-         size=(0.080, 0.005, 0.135), xyz=(0.30, -0.44, 1.32), color=C["target"]),
+         size=(0.08025, 0.00625, 0.13575), xyz=(0.30, -0.44, 1.32), color=C["target"]),
 ]
 
 
@@ -214,26 +238,26 @@ STATIC = [
 #
 # Slabs face the customer (-y). Arm A picks them straight up out of the groove.
 
-SLAB = dict(w=0.080, t=0.005, h=0.135)        # graded slab: width (x), thickness (y), height (z)
+SLAB = dict(w=0.08025, t=0.00625, h=0.13575)  # graded slab: width (x), thickness (y), height (z)
 
 RACK = dict(
     n_racks=3,              # stands in the case, front to back
     per_rack=4,             # slabs per stand
-    gap=0.010,              # space between neighbouring slabs
+    gap=0.020,              # space between neighbouring slabs
     end_margin=0.015,       # wood past the first/last slab at each end
-    centre_x=0.42,          # stand centre along x
+    centre_x=0.455,         # stand centre along x (slid right to make room for the hand-off holder)
     rack_y=(0.00, 0.10, 0.20),   # groove centreline of each stand (front -> back)
-    groove=0.007,           # groove width (slab is 0.005, so 1 mm play each side)
+    groove=0.009,           # groove width (slab is 0.00625, so ~1.4 mm play each side)
     base_h=0.015,           # base plate height = groove floor
     lip_h=0.030,            # front lip top, above the bench
     lip_d=0.018,            # front lip depth (y)
     back_h=0.050,           # back block top, above the bench
     back_d=0.025,           # back block depth (y)
 )
-RACK["pitch_x"] = SLAB["w"] + RACK["gap"]                                   # 0.090
+RACK["pitch_x"] = SLAB["w"] + RACK["gap"]                                   # 0.10025
 RACK["length"] = RACK["per_rack"] * SLAB["w"] + (RACK["per_rack"] - 1) * RACK["gap"] \
-    + 2 * RACK["end_margin"]                                               # 0.380
-RACK["depth"] = RACK["lip_d"] + RACK["groove"] + RACK["back_d"]             # 0.050
+    + 2 * RACK["end_margin"]                                               # 0.411
+RACK["depth"] = RACK["lip_d"] + RACK["groove"] + RACK["back_d"]             # 0.052
 
 
 def _rack_specs():
@@ -261,6 +285,69 @@ def _rack_specs():
 
 
 STATIC.extend(_rack_specs())
+
+
+# ----------------------------------------------------------------------------
+# HAND-OFF HOLDER (transfer_nest): one-slab stand where Arm A leaves a slab
+# upright for the COBOTTA to pick from the top. Same profile as the vault stands.
+# ----------------------------------------------------------------------------
+TRANSFER = dict(x=0.17, y=0.18)                 # slot centre; within the COBOTTA's reach
+
+
+def _transfer_specs():
+    g, bh = RACK["groove"], RACK["base_h"]
+    L = SLAB["w"] + 2 * RACK["end_margin"]
+    x, yc = TRANSFER["x"], TRANSFER["y"]
+    y_front = yc - g / 2 - RACK["lip_d"]
+    y_back = yc + g / 2 + RACK["back_d"]
+    return [
+        dict(name="transfer_nest", group="pack", type="cuboid",
+             size=(L, y_back - y_front, bh), xyz=(x, (y_front + y_back) / 2, BENCH_H + bh / 2),
+             color=C["nest"]),
+        dict(name="transfer_lip", group="pack", type="cuboid",
+             size=(L, RACK["lip_d"], RACK["lip_h"] - bh),
+             xyz=(x, y_front + RACK["lip_d"] / 2, BENCH_H + (bh + RACK["lip_h"]) / 2), color=C["nest"]),
+        dict(name="transfer_back", group="pack", type="cuboid",
+             size=(L, RACK["back_d"], RACK["back_h"] - bh),
+             xyz=(x, y_back - RACK["back_d"] / 2, BENCH_H + (bh + RACK["back_h"]) / 2), color=C["nest"]),
+    ]
+
+
+def transfer_grasp_xyz(depth=0.030):
+    """Point between the gripper fingers for a slab standing in the hand-off holder."""
+    return (TRANSFER["x"], TRANSFER["y"], BENCH_H + RACK["base_h"] + SLAB["h"] - depth)
+
+
+# ----------------------------------------------------------------------------
+# ROBOT BAY: bench extension under Arm A, warning tape on the floor around it
+# ----------------------------------------------------------------------------
+def _bay_specs():
+    x0, x1 = CELL_W / 2, CELL_W / 2 + 0.20           # bench extension, flush with the table edge
+    ey0, ey1 = BAY_BENCH_Y
+    bx, fy0, fy1 = BAY["x1"], BAY["y0"], BAY["y1"]
+    out = [
+        dict(name="bay_bench_top", group="arm_bay", type="cuboid",
+             size=(x1 - x0, ey1 - ey0, 0.05), xyz=((x0 + x1) / 2, (ey0 + ey1) / 2, BENCH_H - 0.025),
+             color=C["table"]),
+        dict(name="bay_bench_body", group="arm_bay", type="cuboid",
+             size=(x1 - (x0 - 0.04), ey1 - ey0 - 0.04, BENCH_H - 0.05),
+             xyz=((x0 - 0.04 + x1) / 2, (ey0 + ey1) / 2, (BENCH_H - 0.05) / 2), color=C["cabinet"]),
+    ]
+    # hazard tape on the floor: front, right and back of the bay (the bench closes the fourth side)
+    fw, fz = 0.05, 0.02 + 0.001
+    out += [
+        dict(name="floor_tape_front", group="safety", type="cuboid",
+             size=(bx - (x0 - 0.04) + fw / 2, fw, 0.002), xyz=((x0 - 0.04 + bx + fw / 2) / 2, fy0, fz), color=C["tape"]),
+        dict(name="floor_tape_right", group="safety", type="cuboid",
+             size=(fw, fy1 - fy0 - fw, 0.002), xyz=(bx, (fy0 + fy1) / 2, fz), color=C["tape"]),
+        dict(name="floor_tape_back", group="safety", type="cuboid",
+             size=(bx - (x0 - 0.04) + fw / 2, fw, 0.002), xyz=((x0 - 0.04 + bx + fw / 2) / 2, fy1, fz), color=C["tape"]),
+    ]
+    return out
+
+
+STATIC.extend(_transfer_specs())
+STATIC.extend(_bay_specs())
 
 SHOW_MARKERS = False
 
@@ -346,13 +433,14 @@ def card_objects():
 # Anything that fails to import is drawn as a placeholder instead.
 
 UR3E_HOME = [radians(a) for a in (90, -120, 60, -30, -90, 0)]   # tucked inside the cell
+KAWASAKI_HOME = [radians(a) for a in (98, 4, 95, 0, 89, -82)]     # reaching in, 30 cm above the middle stand, under the roof
 
 ROBOTS = {
     "A_vault": dict(label="Arm A - vault (Kawasaki RS007N)",
-                    loader="models.Kawasaki_RS007N.Kawasaki_test:RS007N", base_xyz=(0.42, 0.42, BENCH_H),
-                    base_rpy=(0, 0, -pi / 2), q0=None, placeholder_h=0.45),
+                    loader="models.Kawasaki_RS007N.Kawasaki_test:RS007N", base_xyz=ARM_A_BASE,
+                    base_rpy=(0, 0, pi), q0=KAWASAKI_HOME, placeholder_h=0.45),
     "B_inspect": dict(label="Arm B - inspect and pack (Denso COBOTTA)",
-                     loader="cobotta_test:COBOTTA", base_xyz=(-0.12, 0.18, BENCH_H),
+                      loader="cobotta_test:COBOTTA", base_xyz=(-0.12, 0.18, BENCH_H),
                       base_rpy=(0, 0, -pi / 2), q0=None, placeholder_h=0.30),
     "D_show": dict(label="UR3e - showcase and outfeed (also the real robot)",
                    loader="ir_support:UR3e", base_xyz=(0.30, -0.22, BENCH_H),
@@ -373,7 +461,7 @@ FRAMES = dict(
     camera=(-0.05, -0.05, 1.35),
     bag_tray=(-0.25, -0.05, BENCH_H + 0.02),
     mailer=(-0.22, 0.12, BENCH_H + 0.05),
-    transfer_nest=(0.05, 0.00, BENCH_H + 0.02),
+    transfer_nest=(TRANSFER["x"], TRANSFER["y"], BENCH_H + RACK["base_h"] + SLAB["h"]),
     display=(0.30, -0.44, 1.32),
     chute=(0.45, -0.46, BENCH_H + 0.14),
     conveyor_infeed=(0.45, CONV_Y, CONV_TOP + 0.03),
