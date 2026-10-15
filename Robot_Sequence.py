@@ -327,20 +327,20 @@ class PackagingTask:
                 self.ui["request"] = what
             return cb
 
-        self.status = swift.Label(label="starting up")
+        self.status = swift.Label(desc="starting up")
         self.env.add(self.status)
-        self.env.add(swift.Button(flip, label="FLIP"))
-        self.env.add(swift.Button(finish(False), label="ACCEPT"))
-        self.env.add(swift.Button(finish(True), label="REJECT"))
-        self.env.add(swift.Button(estop, label="EMERGENCY STOP"))
-        self.env.add(swift.Button(reset, label="E-STOP RELEASE"))
-        self.env.add(swift.Button(request("start"), label="Start cycle"))
-        self.env.add(swift.Button(request("restart"), label="Restart scene"))
+        self.env.add(swift.Button(flip, desc="FLIP"))
+        self.env.add(swift.Button(finish(False), desc="ACCEPT"))
+        self.env.add(swift.Button(finish(True), desc="REJECT"))
+        self.env.add(swift.Button(estop, desc="EMERGENCY STOP"))
+        self.env.add(swift.Button(reset, desc="E-STOP RELEASE"))
+        self.env.add(swift.Button(request("start"), desc="Start cycle"))
+        self.env.add(swift.Button(request("restart"), desc="Restart scene"))
 
     def say(self, text):
         print(f"   {text}")
         if getattr(self, "status", None) is not None:
-            self.status.label = text
+            self.status.desc = text
 
     def show_face(self, face):
         s = self.spots()["scan"]
