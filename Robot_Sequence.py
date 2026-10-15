@@ -1,4 +1,9 @@
-"""Arm B (COBOTTA) scan and packaging task. Explained in CODE_GUIDE.md."""
+"""Arm A (Kawasaki) vault + Arm B (COBOTTA) scan and packaging task. Explained in CODE_GUIDE.md.
+
+The customer picks a card on the Swift panel; the Kawasaki fetches it from its stand into
+the hand-off holder (vault_sequence.py), the COBOTTA scans it and packs it, and if the
+operator rejects it the COBOTTA leaves it on the Return mount and the Kawasaki puts it back
+in its own slot."""
 
 import argparse
 from math import pi
@@ -11,6 +16,7 @@ from spatialmath import SE3
 import card_vault_scene as cvs
 import scene_config as cfg
 import cobotta_collision_detection as cell
+import vault_sequence as vault
 
 
 # ----------------------------------------------------------------------------
@@ -152,7 +158,7 @@ class PackagingTask:
         self.headless = headless
         self.face = None
         self.ui = dict(face="front", go=False, reject=False, estop=False,
-                       request=None)
+                       request=None, card=None)
         self.status = None
         self.env.launch(realtime=not headless, headless=headless)
         self.shapes, robots = cvs.build_scene(self.env)
@@ -169,6 +175,12 @@ class PackagingTask:
         self.ctrl = cell.Controller(self.robot, self.hand, self.gate, self.world, self.cfg)
         self.start_poses = {n: SE3(sh.T) for n, sh in self.shapes.items()}
         self.ctrl.refresh()
+        self.slab_card = None
+        self.packed = False
+        kawasaki = robots.get(vault.ARM)
+        self.vault = (vault.VaultArm(self.env, kawasaki, self.shapes, self.gate,
+                                     cobotta=self.robot, cobotta_cfg=self.cfg, say=self.say)
+                      if kawasaki is not None else None)
         if not headless:
             self.add_panel()
         self.env.step(0.0)
@@ -187,6 +199,40 @@ class PackagingTask:
         self.env.step(0.0)
         print("   (slab placed in the hand-off holder - stands in for Arm A)")
         return shape
+
+    def sync_world(self):
+        """Copy every object's pose from Swift into the COBOTTA's world (the Kawasaki moves cards)."""
+        held = [ob.name for _, ob, _ in self.ctrl.carried]
+        for ob in self.world.obstacles:
+            shape = self.shapes.get(ob.name)
+            if shape is not None and ob.name not in held:
+                ob.pose = SE3(np.array(shape.T), check=False)
+
+    def hand_over(self, card):
+        """The card the Kawasaki just delivered becomes the COBOTTA's "slab"."""
+        self.world.get(card).name = "slab"
+        self.shapes["slab"] = self.shapes[card]
+        self.slab_card = card
+        self.sync_world()
+
+    def take_back(self):
+        """Undo hand_over: the slab goes back to being card_cXrY."""
+        if self.slab_card is None:
+            return None
+        card, self.slab_card = self.slab_card, None
+        try:
+            self.world.get("slab").name = card
+        except StopIteration:
+            pass
+        self.shapes.pop("slab", None)
+        return card
+
+    def chosen_card(self):
+        avail = self.vault.available()
+        card = self.ui.get("card")
+        if card is None and avail:
+            card = avail[0]
+        return card if card in avail else None
 
     def spots(self):
         p, m = cfg.PACK, cfg.MOUNT
@@ -329,6 +375,16 @@ class PackagingTask:
 
         self.status = swift.Label(desc="starting up")
         self.env.add(self.status)
+        if self.vault is not None:
+            names = list(self.vault.slot_of)
+            labels = [f"Stand {r + 1} - slot {c + 1}" for c, r in self.vault.slot_of.values()]
+            self.ui["card"] = names[0]
+
+            def choose(index):
+                self.ui["card"] = names[int(index)]
+                self.say(f"selected {labels[int(index)]} - press Start cycle")
+
+            self.env.add(swift.Select(choose, desc="Card", options=labels, value=0))
         self.env.add(swift.Button(flip, desc="FLIP"))
         self.env.add(swift.Button(finish(False), desc="ACCEPT"))
         self.env.add(swift.Button(finish(True), desc="REJECT"))
@@ -362,10 +418,24 @@ class PackagingTask:
                 self.say(f"{self.face} face at the camera - FLIP again, or ACCEPT or REJECT")
         return self.ui["reject"]
 
-    def run(self, reject=False):
+    def run(self, reject=False, card=None):
         ctrl, sp = self.ctrl, self.spots()
         home = np.deg2rad(TASK["home_deg"])
         p = cfg.PACK
+
+        if self.vault is not None:
+            if self.packed:
+                self.say("the box is already on the outfeed - press Restart scene first")
+                return
+            card = card if card is not None else self.chosen_card()
+            if card is None:
+                self.say("that card is no longer in the vault - choose another")
+                return
+            print(f"0. Kawasaki fetches {card} into the hand-off holder")
+            if not self.vault.fetch(card):
+                self.say("Kawasaki could not fetch the card - holding")
+                return
+            self.hand_over(card)
 
         print("1. collect the slab from the hand-off holder")
         self.pick("slab", sp["handoff"])
@@ -378,6 +448,12 @@ class PackagingTask:
             self.place(sp["giveback"], SE3(*cfg.mount_slab_xyz("return")))
             self.say("slab on the Return mount - waiting")
             self.park()
+            card = self.take_back()
+            if self.vault is not None and card is not None:
+                print(f"4. Kawasaki puts {card} back in its slot")
+                self.vault.sync()
+                self.vault.put_back(card)
+                self.say(f"{card} is back in the vault - choose a card and press Start cycle")
             print(f"done - {ctrl.replans} re-plan(s), {ctrl.faults} fault(s)")
             return
 
@@ -397,6 +473,8 @@ class PackagingTask:
 
         print("6. back to the waiting pose, clear of the UR3e")
         self.park()
+        self.take_back()                     # the card stays in the box; its slot stays empty
+        self.packed = True
         print(f"done - {ctrl.replans} re-plan(s), {ctrl.faults} fault(s)")
 
     def park(self):
@@ -405,6 +483,8 @@ class PackagingTask:
         return ok
 
     def reset_scene(self):
+        self.take_back()
+        self.packed = False
         self.ctrl.carried.clear()
         for name, pose in self.start_poses.items():
             self.shapes[name].T = pose.A
@@ -420,6 +500,8 @@ class PackagingTask:
         self.ctrl.faults = 0
         self.ui.update(face="front", go=False, reject=False)
         self.face = None
+        if self.vault is not None:
+            self.vault.reset()
         self.ctrl.refresh()
         self.env.step(0.0)
 
@@ -498,15 +580,17 @@ def main():
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--reject", action="store_true", help="fail the scan")
     ap.add_argument("--reach", action="store_true", help="IK check every pose only")
+    ap.add_argument("--card", default=None, help="card for --headless, e.g. card_c1r2")
     args = ap.parse_args()
 
     task = PackagingTask().build(headless=args.headless or args.reach)
-    task.spawn_slab()
+    if task.vault is None or args.reach:
+        task.spawn_slab()                 # no Kawasaki: stand-in slab in the holder
     if args.reach:
         task.reach_report()
         return
     if args.headless:
-        task.run(reject=args.reject)
+        task.run(reject=args.reject, card=args.card)
         return
     task.console()
 
