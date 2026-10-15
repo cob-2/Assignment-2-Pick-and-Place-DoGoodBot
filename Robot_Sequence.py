@@ -1,10 +1,3 @@
-"""Arm A (Kawasaki) vault + Arm B (COBOTTA) scan and packaging task. Explained in CODE_GUIDE.md.
-
-The customer picks a card on the Swift panel; the Kawasaki fetches it from its stand into
-the hand-off holder (vault_sequence.py), the COBOTTA scans it and packs it, and if the
-operator rejects it the COBOTTA leaves it on the Return mount and the Kawasaki puts it back
-in its own slot."""
-
 import argparse
 from math import pi
 
@@ -377,21 +370,21 @@ class PackagingTask:
         self.env.add(self.status)
         if self.vault is not None:
             names = list(self.vault.slot_of)
-            labels = [f"Stand {r + 1} - slot {c + 1}" for c, r in self.vault.slot_of.values()]
+            labels = [f"Rack {r + 1} - Slot {c + 1}" for c, r in self.vault.slot_of.values()]
             self.ui["card"] = names[0]
 
             def choose(index):
                 self.ui["card"] = names[int(index)]
-                self.say(f"selected {labels[int(index)]} - press Start cycle")
+                self.say(f"selected {labels[int(index)]} - Choose a card and press START")
 
             self.env.add(swift.Select(choose, desc="Card", options=labels, value=0))
+            self.env.add(swift.Button(request("start"), desc="START"))
         self.env.add(swift.Button(flip, desc="FLIP"))
         self.env.add(swift.Button(finish(False), desc="ACCEPT"))
         self.env.add(swift.Button(finish(True), desc="REJECT"))
         self.env.add(swift.Button(estop, desc="EMERGENCY STOP"))
         self.env.add(swift.Button(reset, desc="E-STOP RELEASE"))
-        self.env.add(swift.Button(request("start"), desc="Start cycle"))
-        self.env.add(swift.Button(request("restart"), desc="Restart scene"))
+        self.env.add(swift.Button(request("restart"), desc="RESTART SCENE"))
 
     def say(self, text):
         print(f"   {text}")
