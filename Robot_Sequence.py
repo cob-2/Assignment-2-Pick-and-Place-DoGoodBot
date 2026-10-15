@@ -45,7 +45,13 @@ class Halt(Exception):
     pass
 
 
+class Restart(Exception):
+    """RESTART SCENE pressed while the robots are moving."""
+
+
 class StopGate:
+    """Every motion step goes through here, so the panel buttons work mid-cycle."""
+
     def __init__(self, env, ui):
         self.env, self.ui = env, ui
 
@@ -53,6 +59,10 @@ class StopGate:
         self.env.step(dt)
         if self.ui.get("estop"):
             raise Halt
+        if self.ui.get("request") == "restart":
+            raise Restart
+        if self.ui.get("request") == "start":      # already running - ignore it
+            self.ui["request"] = None
 
 
 def checker_cfg():
@@ -357,16 +367,16 @@ class PackagingTask:
         def reset(_):
             if self.ui["estop"]:
                 self.ui["estop"] = False
-                self.say("e-stop released - press Start cycle")
+                self.say("e-stop released - Choose a slot and press START")
             else:
-                self.say("nothing to reset")
+                self.say("Nothing to reset")
 
         def request(what):
             def cb(_):
-                self.ui["request"] = what
+                self.ui["Request"] = what
             return cb
 
-        self.status = swift.Label(desc="starting up")
+        self.status = swift.Label(desc="Starting up")
         self.env.add(self.status)
         if self.vault is not None:
             names = list(self.vault.slot_of)
@@ -375,7 +385,7 @@ class PackagingTask:
 
             def choose(index):
                 self.ui["card"] = names[int(index)]
-                self.say(f"selected {labels[int(index)]} - Choose a card and press START")
+                self.say(f"Selected {labels[int(index)]} - Choose a card and press START")
 
             self.env.add(swift.Select(choose, desc="Card", options=labels, value=0))
             self.env.add(swift.Button(request("start"), desc="START"))
@@ -403,12 +413,12 @@ class PackagingTask:
         if self.headless:
             self.show_face("back")
             return False
-        self.say("front face at the camera - FLIP to see the other side, then ACCEPT or REJECT")
+        self.say("Front face at the camera - FLIP to see the other side, then ACCEPT or REJECT")
         while not self.ui["go"]:
             self.gate.step(0.05)
             if self.ui["face"] != self.face:
                 self.show_face(self.ui["face"])
-                self.say(f"{self.face} face at the camera - FLIP again, or ACCEPT or REJECT")
+                self.say(f"{self.face} Face at the camera - FLIP again, or ACCEPT or REJECT")
         return self.ui["reject"]
 
     def run(self, reject=False, card=None):
@@ -446,7 +456,7 @@ class PackagingTask:
                 print(f"4. Kawasaki puts {card} back in its slot")
                 self.vault.sync()
                 self.vault.put_back(card)
-                self.say(f"{card} is back in the vault - choose a card and press Start cycle")
+                self.say(f"{card} is back in the vault - choose a card and press START")
             print(f"done - {ctrl.replans} re-plan(s), {ctrl.faults} fault(s)")
             return
 
@@ -472,7 +482,7 @@ class PackagingTask:
 
     def park(self):
         ok = self.ctrl.move_to(np.deg2rad(TASK["park_deg"]))
-        self.say("waiting - clear of the UR3e's path")
+        self.say("Waiting - clear of the UR3e's path")
         return ok
 
     def reset_scene(self):
@@ -499,7 +509,7 @@ class PackagingTask:
         self.env.step(0.0)
 
     def console(self):
-        self.say("ready - press Start cycle")
+        self.say("Ready - choose a card and press START")
         while True:
             self.env.step(0.05)
             req = self.ui.get("request")
@@ -514,10 +524,16 @@ class PackagingTask:
                 try:
                     self.run()
                 except Halt:
-                    self.say("E-STOP - motion stopped. Press E-STOP RELEASE, then Restart scene")
+                    self.say("E-STOP - motion stopped. Press E-STOP RELEASE, then RESTART SCENE")
+                except Restart:
+                    self.restart()
             elif req == "restart":
-                self.reset_scene()
-                self.say("scene restarted - press Start cycle")
+                self.restart()
+
+    def restart(self):
+        self.ui["request"] = None
+        self.reset_scene()
+        self.say("Scene restarted - choose a card and press START")
 
     def park_clearance(self, width=0.10, heights=(0.04, 0.12, 0.22, 0.32), n=40):
         q_park = np.deg2rad(TASK["park_deg"])
