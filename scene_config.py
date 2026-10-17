@@ -22,6 +22,13 @@ PANEL_T = 0.012
 CONV_Y = -0.78
 CONV_TOP = 0.95
 
+# Infeed spur: a short belt that starts inside the case, runs out through the
+# front hatch and ends against the side of the main conveyor. The UR3e sets the
+# boxed card down on its inside end; no ramp.
+HATCH = dict(x=-0.35, w=0.23, h=0.26)          # opening centre x, clear width, clear height
+SPUR = dict(x=HATCH["x"], y_in=-0.36, y_out=CONV_Y + 0.10, w=0.20, belt_w=0.17)
+SPUR_DROP_XY = (SPUR["x"], -0.40)             # where the UR3e puts the box down
+
 # ----------------------------------------------------------------------------
 # COLOURS
 # ----------------------------------------------------------------------------
@@ -92,9 +99,18 @@ STATIC = [
          size=(CELL_W - 0.08, CELL_D - 0.08, BENCH_H - 0.05), xyz=(0, CELL_YC, (BENCH_H - 0.05) / 2),
          color=C["cabinet"]),
 
+    # front glass in three panes around the hatch the spur belt runs through
     dict(name="glass_front", group="enclosure", type="cuboid",
-         size=(CASE_X1 + CELL_W / 2, PANEL_T, GLASS_H),
-         xyz=((CASE_X1 - CELL_W / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
+         size=(HATCH["x"] - HATCH["w"] / 2 + CELL_W / 2, PANEL_T, GLASS_H),
+         xyz=((HATCH["x"] - HATCH["w"] / 2 - CELL_W / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
+         color=C["glass"]),
+    dict(name="glass_front_r", group="enclosure", type="cuboid",
+         size=(CASE_X1 - HATCH["x"] - HATCH["w"] / 2, PANEL_T, GLASS_H),
+         xyz=((CASE_X1 + HATCH["x"] + HATCH["w"] / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
+         color=C["glass"]),
+    dict(name="glass_front_top", group="enclosure", type="cuboid",
+         size=(HATCH["w"], PANEL_T, GLASS_H - HATCH["h"]),
+         xyz=(HATCH["x"], FRONT_Y + PANEL_T, BENCH_H + (HATCH["h"] + GLASS_H) / 2),
          color=C["glass"]),
     dict(name="glass_left", group="enclosure", type="cuboid",
          size=(PANEL_T, CELL_D, GLASS_H), xyz=(-CELL_W / 2 + PANEL_T, CELL_YC, BENCH_H + GLASS_H / 2),
@@ -135,17 +151,30 @@ STATIC = [
               BENCH_H + CAM["height"] + CAM["head"][2] / 2), color=C["frame"]),
 
 
-    dict(name="chute_sill", group="hatch", type="cuboid",
-         size=(0.26, 0.03, 0.016), xyz=(0.45, FRONT_Y + PANEL_T, BENCH_H + 0.042), color=C["frame"]),
-    dict(name="chute_head", group="hatch", type="cuboid",
-         size=(0.26, 0.03, 0.016), xyz=(0.45, FRONT_Y + PANEL_T, BENCH_H + 0.238), color=C["frame"]),
-    dict(name="chute_jamb_l", group="hatch", type="cuboid",
-         size=(0.016, 0.03, 0.21), xyz=(0.327, FRONT_Y + PANEL_T, BENCH_H + 0.14), color=C["frame"]),
-    dict(name="chute_jamb_r", group="hatch", type="cuboid",
-         size=(0.016, 0.03, 0.21), xyz=(0.573, FRONT_Y + PANEL_T, BENCH_H + 0.14), color=C["frame"]),
-    dict(name="chute_ramp", group="hatch", type="cuboid",
-         size=(0.22, 0.30, 0.010), xyz=(0.45, -0.62, BENCH_H + 0.09), rpy=(0.30, 0, 0),
+    dict(name="hatch_head", group="hatch", type="cuboid",
+         size=(HATCH["w"] + 0.032, 0.03, 0.016),
+         xyz=(HATCH["x"], FRONT_Y + PANEL_T, BENCH_H + HATCH["h"] + 0.008), color=C["frame"]),
+    dict(name="hatch_jamb_l", group="hatch", type="cuboid",
+         size=(0.016, 0.03, HATCH["h"]),
+         xyz=(HATCH["x"] - HATCH["w"] / 2 - 0.008, FRONT_Y + PANEL_T, BENCH_H + HATCH["h"] / 2),
          color=C["frame"]),
+    dict(name="hatch_jamb_r", group="hatch", type="cuboid",
+         size=(0.016, 0.03, HATCH["h"]),
+         xyz=(HATCH["x"] + HATCH["w"] / 2 + 0.008, FRONT_Y + PANEL_T, BENCH_H + HATCH["h"] / 2),
+         color=C["frame"]),
+
+    dict(name="spur_frame", group="conveyor", type="cuboid",
+         size=(SPUR["w"], SPUR["y_in"] - SPUR["y_out"], 0.04),
+         xyz=(SPUR["x"], (SPUR["y_in"] + SPUR["y_out"]) / 2, CONV_TOP - 0.02), color=C["conveyor"]),
+    dict(name="spur_belt", group="conveyor", type="cuboid",
+         size=(SPUR["belt_w"], SPUR["y_in"] - SPUR["y_out"] - 0.01, 0.012),
+         xyz=(SPUR["x"], (SPUR["y_in"] + SPUR["y_out"]) / 2, CONV_TOP + 0.006), color=C["belt"]),
+    dict(name="spur_leg_l", group="conveyor", type="cylinder",
+         radius=0.02, length=CONV_TOP - 0.06,
+         xyz=(SPUR["x"] - 0.07, (FRONT_Y + SPUR["y_out"]) / 2, (CONV_TOP - 0.06) / 2), color=C["frame"]),
+    dict(name="spur_leg_r", group="conveyor", type="cylinder",
+         radius=0.02, length=CONV_TOP - 0.06,
+         xyz=(SPUR["x"] + 0.07, (FRONT_Y + SPUR["y_out"]) / 2, (CONV_TOP - 0.06) / 2), color=C["frame"]),
 
     dict(name="conveyor_frame", group="conveyor", type="cuboid",
          size=(1.40, 0.20, 0.10), xyz=(-0.10, CONV_Y, CONV_TOP - 0.05), color=C["conveyor"]),
@@ -169,8 +198,6 @@ STATIC = [
     dict(name="conveyor_leg_bl", group="conveyor", type="cylinder",
          radius=0.025, length=CONV_TOP - 0.10, xyz=(-0.72, CONV_Y - 0.07, (CONV_TOP - 0.10) / 2),
          color=C["frame"]),
-    dict(name="pickup_tray", group="conveyor", type="cuboid",
-         size=(0.24, 0.20, 0.012), xyz=(-0.92, CONV_Y, CONV_TOP + 0.01), color=C["nest"]),
 
     dict(name="stand_base", group="panel", type="cylinder",
          radius=0.14, length=0.02, xyz=(0.95, -0.62, 0.01), color=C["frame"]),
@@ -190,12 +217,6 @@ STATIC = [
          radius=0.026, length=0.03, local_xyz=(0.08, -0.052, -0.068), local_rpy=(pi / 2, 0, 0),
          color=C["stop"]),
 
-    dict(name="curtain_post_l", group="safety", type="cylinder",
-         radius=0.012, length=0.34, xyz=(-0.92, CONV_Y + 0.16, CONV_TOP + 0.17), color=C["frame"]),
-    dict(name="curtain_post_r", group="safety", type="cylinder",
-         radius=0.012, length=0.34, xyz=(-0.92, CONV_Y - 0.16, CONV_TOP + 0.17), color=C["frame"]),
-    dict(name="curtain_beam", group="safety", type="cuboid",
-         size=(0.006, 0.32, 0.006), xyz=(-0.92, CONV_Y, CONV_TOP + 0.17), color=C["beam"]),
     dict(name="estop_staff", group="safety", type="cylinder",
          radius=0.026, length=0.03,
          xyz=(0.60, BACK_Y - PANEL_T / 2 + 0.015, BENCH_H + 0.12), rpy=(pi / 2, 0, 0),
@@ -517,6 +538,12 @@ def card_objects():
 # ----------------------------------------------------------------------------
 
 UR3E_HOME = [radians(a) for a in (90, -120, 60, -30, -90, 0)]
+# The UR3e sits at the front left, on the far side of the outfeed pad from the
+# camera: from the front right the camera is right between it and the pad, and at
+# bench height its upper arm can't pass over the camera head. A riser (m) is
+# optional; 0 means none.
+UR3E_XY = (-0.45, -0.20)
+UR3E_RISER = 0.0
 KAWASAKI_HOME = [radians(a) for a in (98, 4, 95, 0, 89, -82)]
 
 ROBOTS = {
@@ -526,10 +553,15 @@ ROBOTS = {
     "B_inspect": dict(label="Arm B - inspect and pack (Denso COBOTTA)",
                       loader="cobotta_test:COBOTTA", base_xyz=(-0.12, 0.18, BENCH_H),
                       base_rpy=(0, 0, -pi / 2), q0=None, placeholder_h=0.30),
-    "D_show": dict(label="UR3e + RG2 - showcase and outfeed (also the real robot)",
-                   loader="models.ur3e_rg2:UR3eRG2", base_xyz=(0.30, -0.22, BENCH_H),
+    "C_handover": dict(label="UR3e + RG2 - showcase and outfeed (also the real robot)",
+                   loader="models.ur3e_rg2:UR3eRG2", base_xyz=(*UR3E_XY, BENCH_H + UR3E_RISER),
                    base_rpy=(0, 0, pi / 2), q0=UR3E_HOME, placeholder_h=0.40),
 }
+
+if UR3E_RISER > 0:
+    STATIC.append(dict(name="ur3e_riser", group="arm_bay", type="cuboid",
+                       size=(0.14, 0.14, UR3E_RISER),
+                       xyz=(*UR3E_XY, BENCH_H + UR3E_RISER / 2), color=C["pedestal"]))
 
 SHOW_PEDESTALS = True
 PEDESTAL = dict(radius=0.055, length=0.02)
@@ -552,8 +584,9 @@ FRAMES = dict(
     outfeed=(PACK["outfeed_xy"][0], PACK["outfeed_xy"][1], BENCH_H + PACK["pad"][2]),
     transfer_nest=(TRANSFER["x"], TRANSFER["y"], BENCH_H + RACK["base_h"] + SLAB["h"]),
     display=(0.30, -0.44, 1.32),
-    chute=(0.45, -0.46, BENCH_H + 0.14),
-    conveyor_infeed=(0.45, CONV_Y, CONV_TOP + 0.03),
+    hatch=(HATCH["x"], FRONT_Y + PANEL_T, BENCH_H + HATCH["h"] / 2),
+    spur_drop=(SPUR_DROP_XY[0], SPUR_DROP_XY[1], CONV_TOP + 0.012),
+    conveyor_infeed=(SPUR["x"], CONV_Y, CONV_TOP + 0.03),
     conveyor_outfeed=(-0.76, CONV_Y, CONV_TOP + 0.03),
     pickup_tray=(-0.92, CONV_Y, CONV_TOP + 0.03),
     control_panel=(0.95, -0.66, 1.05),

@@ -1,22 +1,23 @@
 import argparse
 from math import pi
-
+ 
 import numpy as np
 import swift
 import spatialgeometry as geometry
 from spatialmath import SE3
-
+ 
 import card_vault_scene as cvs
 import scene_config as cfg
 import cobotta_collision_detection as cell
 import vault_sequence as vault
-
-
+import ur3e_outfeed as outfeed
+ 
+ 
 # ----------------------------------------------------------------------------
 # CONFIG
 # ----------------------------------------------------------------------------
 ARM = "B_inspect"
-
+ 
 TASK = dict(
     home_deg=(0, 10, 100, 0, 70, 0),
     park_deg=(-95, 15, 115, 0, 50, 0),
@@ -34,27 +35,27 @@ TASK = dict(
     dt=0.03,
     pause=0.4,
 )
-
+ 
 TOOL_DOWN = SE3.Rx(pi)
-
-
+ 
+ 
 # ============================================================================
 # EMERGENCY STOP
 # ============================================================================
 class Halt(Exception):
     pass
-
-
+ 
+ 
 class Restart(Exception):
     """RESTART SCENE pressed while the robots are moving."""
-
-
+ 
+ 
 class StopGate:
     """Every motion step goes through here, so the panel buttons work mid-cycle."""
-
+ 
     def __init__(self, env, ui):
         self.env, self.ui = env, ui
-
+ 
     def step(self, dt=0.0):
         self.env.step(dt)
         if self.ui.get("estop"):
@@ -63,8 +64,8 @@ class StopGate:
             raise Restart
         if self.ui.get("request") == "start":      # already running - ignore it
             self.ui["request"] = None
-
-
+ 
+ 
 def checker_cfg():
     g = cell.CONFIG["gripper"]
     return dict(
@@ -77,28 +78,28 @@ def checker_cfg():
         gripper=dict(open=g["open"], closed=g["closed"], finger=g["finger"],
                      clearance=g["clearance"]),
     )
-
-
+ 
+ 
 # ----------------------------------------------------------------------------
 # THE ARM'S HAND
 # ----------------------------------------------------------------------------
 class Hand:
-
+ 
     def __init__(self, robot):
         self.robot = robot
-
+ 
     @property
     def opening(self):
         return self.robot.gripper.half
-
+ 
     @opening.setter
     def opening(self, half):
         self.robot.gripper.set_opening(2 * float(half))
-
+ 
     def update(self, _T=None):
         self.robot.gripper.update(self.robot.flange_pose())
-
-
+ 
+ 
 # ----------------------------------------------------------------------------
 # WORLD
 # ----------------------------------------------------------------------------
@@ -113,8 +114,8 @@ def spec_box(spec):
         r = spec["radius"]
         return (2 * r, 2 * r, 2 * r), pose
     return None, None
-
-
+ 
+ 
 def build_world(base_z, spacing):
     world = cell.World(spacing)
     for spec in cfg.resolved_static() + cfg.card_objects():
@@ -127,36 +128,36 @@ def build_world(base_z, spacing):
         under_arm = top <= base_z + 0.012
         world.add_box(spec["name"], size, pose, (0, 1, 2) if under_arm else ())
     return world
-
-
+ 
+ 
 # ----------------------------------------------------------------------------
 # POSES
 # ----------------------------------------------------------------------------
 def over(xy, z, yaw=0.0):
     return SE3(xy[0], xy[1], z + TASK["tool_length"]) * TOOL_DOWN * SE3.Rz(yaw)
-
-
+ 
+ 
 def grasp(xy, top_z, depth=None):
     return over(xy, top_z - (TASK["grip_depth"] if depth is None else depth))
-
-
+ 
+ 
 def approach(xy, top_z, depth=None, lift=None):
     return SE3(0, 0, TASK["lift"] if lift is None else lift) * grasp(xy, top_z, depth)
-
-
+ 
+ 
 def spot_poses(spot):
     g = grasp(spot["xy"], spot["top"], spot.get("depth"))
     return g, approach(spot["xy"], spot["top"], spot.get("depth"), spot.get("lift"))
-
-
+ 
+ 
 # ----------------------------------------------------------------------------
 # THE CELL
 # ----------------------------------------------------------------------------
-class PackagingTask:
+class   PackagingTask:
     def __init__(self):
         self.env = swift.Swift()
         self.cfg = checker_cfg()
-
+ 
     def build(self, headless=False):
         self.headless = headless
         self.face = None
@@ -168,10 +169,10 @@ class PackagingTask:
         self.robot = robots[ARM]
         if self.robot is None:
             raise RuntimeError(f"{ARM} failed to load - see the placeholder message")
-
+ 
         self.robot.tool = SE3()
         self.robot.q = np.deg2rad(TASK["home_deg"])
-
+ 
         self.world = build_world(float(self.robot.base.t[2]), TASK["point_spacing"])
         self.hand = Hand(self.robot)
         self.gate = StopGate(self.env, self.ui)
@@ -184,11 +185,14 @@ class PackagingTask:
         self.vault = (vault.VaultArm(self.env, kawasaki, self.shapes, self.gate,
                                      cobotta=self.robot, cobotta_cfg=self.cfg, say=self.say)
                       if kawasaki is not None else None)
+        ur3e = robots.get(outfeed.ARM)
+        self.outfeed = (outfeed.OutfeedArm(self.env, ur3e, self.shapes, self.gate, say=self.say)
+                        if ur3e is not None else None)
         if not headless:
             self.add_panel()
         self.env.step(0.0)
         return self
-
+ 
     def spawn_slab(self):
         size = (cfg.SLAB["w"], cfg.SLAB["t"], cfg.SLAB["h"])
         x, y = cfg.TRANSFER["x"], cfg.TRANSFER["y"]
@@ -202,7 +206,7 @@ class PackagingTask:
         self.env.step(0.0)
         print("   (slab placed in the hand-off holder - stands in for Arm A)")
         return shape
-
+ 
     def sync_world(self):
         """Copy every object's pose from Swift into the COBOTTA's world (the Kawasaki moves cards)."""
         held = [ob.name for _, ob, _ in self.ctrl.carried]
@@ -210,14 +214,14 @@ class PackagingTask:
             shape = self.shapes.get(ob.name)
             if shape is not None and ob.name not in held:
                 ob.pose = SE3(np.array(shape.T), check=False)
-
+ 
     def hand_over(self, card):
         """The card the Kawasaki just delivered becomes the COBOTTA's "slab"."""
         self.world.get(card).name = "slab"
         self.shapes["slab"] = self.shapes[card]
         self.slab_card = card
         self.sync_world()
-
+ 
     def take_back(self):
         """Undo hand_over: the slab goes back to being card_cXrY."""
         if self.slab_card is None:
@@ -229,14 +233,14 @@ class PackagingTask:
             pass
         self.shapes.pop("slab", None)
         return card
-
+ 
     def chosen_card(self):
         avail = self.vault.available()
         card = self.ui.get("card")
         if card is None and avail:
             card = avail[0]
         return card if card in avail else None
-
+ 
     def spots(self):
         p, m = cfg.PACK, cfg.MOUNT
         slab_h = cfg.SLAB["h"]
@@ -264,7 +268,7 @@ class PackagingTask:
                          top=cfg.BENCH_H + p["pad"][2] + p["outer"][2],
                          depth=p["grip_below_rim"], lift=0.075),
         )
-
+ 
     def near(self, xy, top, reach=0.075, band=0.25):
         held = [ob.name for _, ob, _ in self.ctrl.carried]
         out = []
@@ -276,7 +280,7 @@ class PackagingTask:
             if np.all(d < 0.0) and lo <= top + 0.05 and hi >= top - band:
                 out.append(ob.name)
         return out
-
+ 
     def riders(self, name, window=0.30, tol=0.004):
         host = self.world.get(name)
         floor = host.pose.t[2] - host.half[2]
@@ -291,7 +295,7 @@ class PackagingTask:
             if inside and floor - tol <= base <= floor + window:
                 out.append(ob.name)
         return out
-
+ 
     def move_linear(self, T_goal, steps=12):
         ctrl = self.ctrl
         T0 = self.robot.fkine(self.robot.q)
@@ -313,7 +317,7 @@ class PackagingTask:
             ctrl.refresh()
             self.gate.step(TASK["dt"])
         return True
-
+ 
     def pick(self, name, spot, grip=None, width=None):
         ctrl, s = self.ctrl, spot
         grip = grip or name
@@ -328,7 +332,7 @@ class PackagingTask:
                 ctrl.grasp(self.shapes[r], self.world.get(r))
             ok &= self.move_linear(a)
         return ok
-
+ 
     def place(self, spot, resting):
         ctrl, s = self.ctrl, spot
         names = [ob.name for _, ob, _ in ctrl.carried]
@@ -339,7 +343,7 @@ class PackagingTask:
             ctrl.release(resting)
             ok &= self.move_linear(a)
         return ok
-
+ 
     def report_scan(self, face):
         slab = self.world.get("slab")
         lens = np.asarray(cfg.FRAMES["camera"], dtype=float)
@@ -347,46 +351,46 @@ class PackagingTask:
         off = np.hypot(d[0], d[2])
         print(f"   camera: {face} face at {np.round(slab.pose.t, 3)}, "
               f"standoff {d[1]:.3f} m, off axis {off * 1000:.0f} mm")
-
+ 
     def add_panel(self):
         self.ui.update(face="front", go=False, reject=False)
-
+ 
         def flip(_):
             self.ui["face"] = "back" if self.ui["face"] == "front" else "front"
-
+ 
         def finish(reject):
             def cb(_):
                 self.ui["reject"] = reject
                 self.ui["go"] = True
             return cb
-
+ 
         def estop(_):
             self.ui["estop"] = True
             self.ui["request"] = None
-
+ 
         def reset(_):
             if self.ui["estop"]:
                 self.ui["estop"] = False
                 self.say("e-stop released - Choose a slot and press START")
             else:
                 self.say("Nothing to reset")
-
+ 
         def request(what):
             def cb(_):
-                self.ui["Request"] = what
+                self.ui["request"] = what
             return cb
-
+ 
         self.status = swift.Label(desc="Starting up")
         self.env.add(self.status)
         if self.vault is not None:
             names = list(self.vault.slot_of)
             labels = [f"Rack {r + 1} - Slot {c + 1}" for c, r in self.vault.slot_of.values()]
             self.ui["card"] = names[0]
-
+ 
             def choose(index):
                 self.ui["card"] = names[int(index)]
                 self.say(f"Selected {labels[int(index)]} - Choose a card and press START")
-
+ 
             self.env.add(swift.Select(choose, desc="Card", options=labels, value=0))
             self.env.add(swift.Button(request("start"), desc="START"))
         self.env.add(swift.Button(flip, desc="FLIP"))
@@ -395,19 +399,19 @@ class PackagingTask:
         self.env.add(swift.Button(estop, desc="EMERGENCY STOP"))
         self.env.add(swift.Button(reset, desc="E-STOP RELEASE"))
         self.env.add(swift.Button(request("restart"), desc="RESTART SCENE"))
-
+ 
     def say(self, text):
         print(f"   {text}")
         if getattr(self, "status", None) is not None:
             self.status.desc = text
-
+ 
     def show_face(self, face):
         s = self.spots()["scan"]
         yaw = 0.0 if face == "front" else pi
         self.ctrl.move_to_pose(over(s["xy"], s["top"] - TASK["grip_depth"], yaw))
         self.face = face
         self.report_scan(face)
-
+ 
     def scan_station(self):
         self.show_face("front")
         if self.headless:
@@ -420,15 +424,15 @@ class PackagingTask:
                 self.show_face(self.ui["face"])
                 self.say(f"{self.face} Face at the camera - FLIP again, or ACCEPT or REJECT")
         return self.ui["reject"]
-
+ 
     def run(self, reject=False, card=None):
         ctrl, sp = self.ctrl, self.spots()
         home = np.deg2rad(TASK["home_deg"])
         p = cfg.PACK
-
+ 
         if self.vault is not None:
             if self.packed:
-                self.say("the box is already on the outfeed - press Restart scene first")
+                self.say("the box has already gone - press Restart scene first")
                 return
             card = card if card is not None else self.chosen_card()
             if card is None:
@@ -439,13 +443,13 @@ class PackagingTask:
                 self.say("Kawasaki could not fetch the card - holding")
                 return
             self.hand_over(card)
-
+ 
         print("1. collect the slab from the hand-off holder")
         self.pick("slab", sp["handoff"])
-
+ 
         print("2. hold it at the camera and wait for the operator")
         reject = self.scan_station() or reject
-
+ 
         if reject:
             print("3. not wanted - stand it on the Return mount for Arm A")
             self.place(sp["giveback"], SE3(*cfg.mount_slab_xyz("return")))
@@ -459,32 +463,35 @@ class PackagingTask:
                 self.say(f"{card} is back in the vault - choose a card and press START")
             print(f"done - {ctrl.replans} re-plan(s), {ctrl.faults} fault(s)")
             return
-
+ 
         print("3. stand the slab in the packaging holder")
         self.place(sp["holder_drop"], SE3(*cfg.holder_slab_xyz()))
-
+ 
         print("4. cap it with the lid")
         self.pick("box_lid", sp["lid"], grip="box_handle")
         self.place(sp["lid_seated"], SE3(*cfg.holder_lid_xyz()))
-
+ 
         print("5. set the finished box on the outfeed pad")
         self.pick("holder_base", sp["box"], grip="holder_wall_py",
                   width=p["outer"][1])
         rest = SE3(p["outfeed_xy"][0], p["outfeed_xy"][1],
                    cfg.BENCH_H + p["pad"][2] + p["wall"] / 2)
         self.place(sp["outfeed"], rest)
-
+ 
         print("6. back to the waiting pose, clear of the UR3e")
         self.park()
         self.take_back()                     # the card stays in the box; its slot stays empty
         self.packed = True
+ 
+        if self.outfeed is not None:         # steps 7-9: UR3e puts the box on the conveyor
+            self.outfeed.deliver()
         print(f"done - {ctrl.replans} re-plan(s), {ctrl.faults} fault(s)")
-
+ 
     def park(self):
         ok = self.ctrl.move_to(np.deg2rad(TASK["park_deg"]))
         self.say("Waiting - clear of the UR3e's path")
         return ok
-
+ 
     def reset_scene(self):
         self.take_back()
         self.packed = False
@@ -505,9 +512,11 @@ class PackagingTask:
         self.face = None
         if self.vault is not None:
             self.vault.reset()
+        if self.outfeed is not None:
+            self.outfeed.reset()
         self.ctrl.refresh()
         self.env.step(0.0)
-
+ 
     def console(self):
         self.say("Ready - choose a card and press START")
         while True:
@@ -529,15 +538,15 @@ class PackagingTask:
                     self.restart()
             elif req == "restart":
                 self.restart()
-
+ 
     def restart(self):
         self.ui["request"] = None
         self.reset_scene()
         self.say("Scene restarted - choose a card and press START")
-
+ 
     def park_clearance(self, width=0.10, heights=(0.04, 0.12, 0.22, 0.32), n=40):
         q_park = np.deg2rad(TASK["park_deg"])
-        ur = cfg.ROBOTS["D_show"]["base_xyz"]
+        ur = cfg.ROBOTS[outfeed.ARM]["base_xyz"]
         pad = cfg.PACK["outfeed_xy"]
         a = np.array([ur[0], ur[1]])
         b = np.array([pad[0], pad[1]])
@@ -556,7 +565,7 @@ class PackagingTask:
             d = np.sqrt(np.sum((rel / radii) ** 2, axis=1))
             worst = min(worst, float(d.min()))
         return worst
-
+ 
     def reach_report(self):
         print(f"{'spot':14s} {'fingertip xyz':28s} {'reach':>7s}  IK")
         base = self.robot.base.t
@@ -582,8 +591,11 @@ class PackagingTask:
                                    cell.contacts(self.robot, self.cfg, self.world,
                                                  np.deg2rad(TASK["home_deg"])))
         print(f"waiting pose collisions: {hit or 'none'}")
-
-
+        if self.outfeed is not None:
+            print()
+            self.outfeed.reach_report()
+ 
+ 
 def main():
     ap = argparse.ArgumentParser(description="COBOTTA scan and packaging task")
     ap.add_argument("--headless", action="store_true")
@@ -591,7 +603,7 @@ def main():
     ap.add_argument("--reach", action="store_true", help="IK check every pose only")
     ap.add_argument("--card", default=None, help="card for --headless, e.g. card_c1r2")
     args = ap.parse_args()
-
+ 
     task = PackagingTask().build(headless=args.headless or args.reach)
     if task.vault is None or args.reach:
         task.spawn_slab()                 # no Kawasaki: stand-in slab in the holder
@@ -602,7 +614,7 @@ def main():
         task.run(reject=args.reject, card=args.card)
         return
     task.console()
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
