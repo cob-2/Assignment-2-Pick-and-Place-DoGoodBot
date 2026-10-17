@@ -30,6 +30,15 @@ CONFIG = dict(
         home_deg=(0, 10, 100, 0, 70, 0),
         pedestal=dict(radius=0.070, height=0.060),
         link_radii=(0.055, 0.050, 0.045, 0.036, 0.028, 0.022),
+        link_boxes=(
+            ((-0.0181, +0.0000, +0.0540), (0.0839, 0.0678, 0.0540)),
+            ((+0.0000, +0.0165, +0.0042), (0.0492, 0.0545, 0.0533)),
+            ((+0.0843, +0.0120, +0.0903), (0.1172, 0.0483, 0.0318)),
+            ((-0.0072, -0.0022, +0.0274), (0.0380, 0.0353, 0.0606)),
+            ((-0.0000, -0.0307, -0.0002), (0.0307, 0.0578, 0.0308)),
+            ((+0.0000, +0.0016, +0.0055), (0.0293, 0.0309, 0.0330)),
+            ((+0.0000, -0.0000, +0.0159), (0.0276, 0.0306, 0.0194)),
+        ),
         tool_length=0.060,
         tool_radius=0.016,
     ),
@@ -91,6 +100,8 @@ CONFIG = dict(
 
     gripper=dict(open=0.015, closed=0.004,
                  finger=(0.014, 0.006, 0.060),
+        pad=(0.0311, 0.0139, 0.0239),
+        pad_xyz=(0.0000, 0.0069, 0.0481),
                  clearance=0.001),
 
     intruder=dict(size=(0.07, 0.07, 0.16), xyz=(-0.10, -0.20, BENCH_H + 0.08),
@@ -226,26 +237,21 @@ def _frame_along(a, b):
 
 def arm_ellipsoids(robot, cfg, q):
     frames = robot.fkine_all(q)
-    origins = np.array([T.t for T in frames])
-    radii = cfg["robot"]["link_radii"]
+    boxes = cfg["robot"]["link_boxes"]
     margin = cfg["motion"]["margin"]
     out = []
-    for i in range(len(origins) - 1):
-        a, b = origins[i], origins[i + 1]
-        R, length = _frame_along(a, b)
-        r = radii[min(i, len(radii) - 1)] + margin
-        out.append((i, (a + b) / 2, R, np.array([r, r, length / 2 + r])))
-    tool = robot.fkine(q)
-    fx, fy, flen = cfg["gripper"]["finger"]
-    opening = getattr(robot, "gripper_opening", cfg["gripper"]["open"])
-    jaw = cfg["motion"]["jaw_margin"]
-    idx = len(origins) - 1
+    for i, (centre, half) in enumerate(boxes[:len(frames)]):
+        T = frames[i]
+        out.append((i, (T * SE3(*centre)).t, T.R, np.asarray(half) + margin))
+    flange = robot.fkine(q)
+    g = cfg["gripper"]
+    px, py, pz = g["pad_xyz"]
+    pad = np.asarray(g["pad"]) / 2 + cfg["motion"]["jaw_margin"]
+    travel = getattr(robot, "gripper_opening", g["open"])
+    idx = len(boxes)
     for side in (1, -1):
-        root = tool * SE3(0, side * (opening + fy / 2), 0)
-        tip = (root * SE3(0, 0, flen)).t
-        R, length = _frame_along(root.t, tip)
-        out.append((idx, (root.t + tip) / 2, R,
-                    np.array([fx / 2 + jaw, fy / 2 + jaw, length / 2 + jaw])))
+        c = flange * SE3(px, side * (travel + py), pz)
+        out.append((idx, c.t, flange.R, pad))
     return out
 
 
@@ -289,17 +295,21 @@ class Controller:
         self.replans = 0
 
     @contextmanager
-    def ignoring(self, names):
+    def ignoring(self, names, links=None):
         obs = [self.world.get(n) for n in names]
-        previous = [o.active for o in obs]
+        previous = [set(o.ignore_links) for o in obs]
         for o in obs:
-            o.active = False
+            if links is None:
+                o.active = False
+            else:
+                o.ignore_links = o.ignore_links | set(links)
         try:
             yield
         finally:
             held = [ob for _, ob, _ in self.carried]
             for o, p in zip(obs, previous):
-                o.active = p and o not in held
+                o.ignore_links = p
+                o.active = o not in held
 
     def plan(self, q_goal):
         m = self.cfg["motion"]
@@ -344,13 +354,15 @@ class Controller:
         return True
 
     def move_to_pose(self, T, mask=None):
-        sol = self.robot.ikine_LM(T, q0=self.robot.q, joint_limits=True,
-                                  mask=mask, slimit=40, ilimit=200)
-        if not sol.success:
-            self.faults += 1
-            print("    IK failed")
-            return False
-        return self.move_to(sol.q)
+        home = np.deg2rad(self.cfg["robot"]["home_deg"])
+        for q0 in (self.robot.q, home):
+            sol = self.robot.ikine_LM(T, q0=q0, joint_limits=True,
+                                      mask=mask, slimit=40, ilimit=200)
+            if sol.success:
+                return self.move_to(sol.q)
+        self.faults += 1
+        print("    IK failed")
+        return False
 
     def refresh(self):
         self.robot._update_3dmodel()

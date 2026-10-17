@@ -2,6 +2,8 @@
 
 from math import pi, radians
 
+import numpy as np
+
 # ----------------------------------------------------------------------------
 # FRAME CONVENTION
 # ----------------------------------------------------------------------------
@@ -15,6 +17,7 @@ FRONT_Y = -0.50
 BACK_Y = FRONT_Y + CELL_D
 CELL_YC = (FRONT_Y + BACK_Y) / 2
 CASE_X1 = CELL_W / 2 - 0.10
+CASE_X2 = CELL_W / 2 + 0.22
 BENCH_H = 0.90
 GLASS_H = 1.20
 PANEL_T = 0.012
@@ -68,8 +71,6 @@ ARM_PORT = dict(
     y1=BACK_Y - 1.5 * PANEL_T - PORT_MARGIN,
     h=GLASS_H - PANEL_T / 2 - PORT_MARGIN,
 )
-BAY_BENCH_Y = (-0.10, 0.50)
-BAY = dict(x1=1.20, y0=-0.25, y1=0.65)
 
 # ----------------------------------------------------------------------------
 # INSPECTION STATION
@@ -94,9 +95,11 @@ STATIC = [
          size=(2.6, 2.8, 0.02), xyz=(0, -0.1, 0.01), color=C["floor"]),
 
     dict(name="table_top", group="table", type="cuboid",
-         size=(CELL_W, CELL_D, 0.05), xyz=(0, CELL_YC, BENCH_H - 0.025), color=C["table"]),
+         size=(CASE_X2 + CELL_W / 2, CELL_D, 0.05),
+         xyz=((CASE_X2 - CELL_W / 2) / 2, CELL_YC, BENCH_H - 0.025), color=C["table"]),
     dict(name="cabinet_body", group="table", type="cuboid",
-         size=(CELL_W - 0.08, CELL_D - 0.08, BENCH_H - 0.05), xyz=(0, CELL_YC, (BENCH_H - 0.05) / 2),
+         size=(CASE_X2 + CELL_W / 2 - 0.08, CELL_D - 0.08, BENCH_H - 0.05),
+         xyz=((CASE_X2 - CELL_W / 2) / 2, CELL_YC, (BENCH_H - 0.05) / 2),
          color=C["cabinet"]),
 
     # front glass in three panes around the hatch the spur belt runs through
@@ -105,8 +108,8 @@ STATIC = [
          xyz=((HATCH["x"] - HATCH["w"] / 2 - CELL_W / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
          color=C["glass"]),
     dict(name="glass_front_r", group="enclosure", type="cuboid",
-         size=(CASE_X1 - HATCH["x"] - HATCH["w"] / 2, PANEL_T, GLASS_H),
-         xyz=((CASE_X1 + HATCH["x"] + HATCH["w"] / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
+         size=(CASE_X2 - HATCH["x"] - HATCH["w"] / 2, PANEL_T, GLASS_H),
+         xyz=((CASE_X2 + HATCH["x"] + HATCH["w"] / 2) / 2, FRONT_Y + PANEL_T, BENCH_H + GLASS_H / 2),
          color=C["glass"]),
     dict(name="glass_front_top", group="enclosure", type="cuboid",
          size=(HATCH["w"], PANEL_T, GLASS_H - HATCH["h"]),
@@ -126,12 +129,15 @@ STATIC = [
          xyz=(CASE_X1 - PANEL_T, (ARM_PORT["y0"] + ARM_PORT["y1"]) / 2,
               BENCH_H + (ARM_PORT["h"] + GLASS_H) / 2), color=C["glass"]),
     dict(name="glass_back", group="enclosure", type="cuboid",
-         size=(CASE_X1 + CELL_W / 2, PANEL_T, GLASS_H),
-         xyz=((CASE_X1 - CELL_W / 2) / 2, BACK_Y - PANEL_T, BENCH_H + GLASS_H / 2),
+         size=(CASE_X2 + CELL_W / 2, PANEL_T, GLASS_H),
+         xyz=((CASE_X2 - CELL_W / 2) / 2, BACK_Y - PANEL_T, BENCH_H + GLASS_H / 2),
          color=C["glass"]),
+    dict(name="glass_right_outer", group="enclosure", type="cuboid",
+         size=(PANEL_T, CELL_D, GLASS_H),
+         xyz=(CASE_X2 - PANEL_T, CELL_YC, BENCH_H + GLASS_H / 2), color=C["glass"]),
     dict(name="roof", group="enclosure", type="cuboid",
-         size=(CASE_X1 + CELL_W / 2, CELL_D, PANEL_T), xyz=((CASE_X1 - CELL_W / 2) / 2, CELL_YC, BENCH_H + GLASS_H),
-         color=C["frame"]),
+         size=(CASE_X2 + CELL_W / 2, CELL_D, PANEL_T),
+         xyz=((CASE_X2 - CELL_W / 2) / 2, CELL_YC, BENCH_H + GLASS_H), color=C["frame"]),
 
 
     dict(name="inspection_nest", group="inspect", type="cuboid",
@@ -217,10 +223,6 @@ STATIC = [
          radius=0.026, length=0.03, local_xyz=(0.08, -0.052, -0.068), local_rpy=(pi / 2, 0, 0),
          color=C["stop"]),
 
-    dict(name="estop_staff", group="safety", type="cylinder",
-         radius=0.026, length=0.03,
-         xyz=(0.60, BACK_Y - PANEL_T / 2 + 0.015, BENCH_H + 0.12), rpy=(pi / 2, 0, 0),
-         color=C["stop"]),
     dict(name="stacklight_post", group="safety", type="cylinder",
          radius=0.010, length=0.10, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.05), color=C["frame"]),
     dict(name="stacklight_green", group="safety", type="cylinder",
@@ -235,6 +237,63 @@ STATIC = [
     dict(name="display_pose_marker", group="markers", type="cuboid",
          size=(0.08025, 0.00625, 0.13575), xyz=(0.30, -0.44, 1.32), color=C["target"]),
 ]
+
+
+# ----------------------------------------------------------------------------
+# SAFETY BARRIERS
+# ----------------------------------------------------------------------------
+BARRIER = dict(
+    x0=-1.24, x1=1.26, y0=-1.02, y1=1.24,
+    post=0.045, rail=0.035, heights=(0.42, 0.88), span=0.72,
+    bays=((0.34, 1.26),),
+)
+
+
+def _run_specs(tag, p0, p1, b):
+    px, py, pz = b["post"], b["post"], b["heights"][-1] + 0.05
+    r = b["rail"]
+    a, c = np.asarray(p0, dtype=float), np.asarray(p1, dtype=float)
+    length = float(np.linalg.norm(c - a))
+    if length < 1e-6:
+        return []
+    n = max(2, int(np.ceil(length / b["span"])) + 1)
+    out = []
+    for i, t in enumerate(np.linspace(0.0, 1.0, n)):
+        x, y = a + t * (c - a)
+        out.append(dict(name=f"barrier_{tag}_post{i}", group="barrier", type="cuboid",
+                        size=(px, py, pz), xyz=(x, y, pz / 2), color=C["frame"]))
+    mid = (a + c) / 2
+    along_x = abs(c[0] - a[0]) > abs(c[1] - a[1])
+    size = (length, r, r) if along_x else (r, length, r)
+    for i, h in enumerate(b["heights"]):
+        out.append(dict(name=f"barrier_{tag}_rail{i}", group="barrier", type="cuboid",
+                        size=size, xyz=(mid[0], mid[1], h), color=C["tape"]))
+    return out
+
+
+def _front_runs(b):
+    edges = [b["x0"]]
+    for lo, hi in b["bays"]:
+        edges += [lo, hi]
+    edges.append(b["x1"])
+    out = []
+    for i in range(0, len(edges) - 1, 2):
+        a, c = edges[i], edges[i + 1]
+        if c - a > b["post"]:
+            out.append((f"front{i // 2}", (a, b["y0"]), (c, b["y0"])))
+    return out
+
+
+def _barrier_specs():
+    b = BARRIER
+    runs = [("back", (b["x0"], b["y1"]), (b["x1"], b["y1"])),
+            ("left", (b["x0"], b["y0"]), (b["x0"], b["y1"])),
+            ("right", (b["x1"], b["y0"]), (b["x1"], b["y1"]))]
+    runs += _front_runs(b)
+    out = []
+    for tag, p0, p1 in runs:
+        out += _run_specs(tag, p0, p1, b)
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -286,6 +345,7 @@ def _rack_specs():
     return out
 
 
+STATIC.extend(_barrier_specs())
 STATIC.extend(_rack_specs())
 
 
@@ -323,7 +383,7 @@ def transfer_grasp_xyz(depth=0.030):
 # ----------------------------------------------------------------------------
 PACK = dict(
     holder_xy=(-0.22, 0.08),
-    lid_xy=(-0.30, 0.14),
+    lid_xy=(-0.30, 0.26),
     outfeed_xy=(-0.20, -0.09),
     inner=(0.090, 0.018, 0.150),
     wall=0.003,
@@ -332,6 +392,7 @@ PACK = dict(
     pad=(0.13, 0.09, 0.006),
     drop=0.045,
     grip_below_rim=0.020,
+    handle_grip=0.008,
 )
 PACK["outer"] = (PACK["inner"][0] + 2 * PACK["wall"],
                  PACK["inner"][1] + 2 * PACK["wall"],
@@ -431,37 +492,9 @@ def mount_grasp_xyz(name, depth=0.030):
     return (x, y, z + SLAB["h"] / 2 - depth)
 
 
-# ----------------------------------------------------------------------------
-# ROBOT BAY
-# ----------------------------------------------------------------------------
-def _bay_specs():
-    x0, x1 = CELL_W / 2, CELL_W / 2 + 0.20
-    ey0, ey1 = BAY_BENCH_Y
-    bx, fy0, fy1 = BAY["x1"], BAY["y0"], BAY["y1"]
-    out = [
-        dict(name="bay_bench_top", group="arm_bay", type="cuboid",
-             size=(x1 - x0, ey1 - ey0, 0.05), xyz=((x0 + x1) / 2, (ey0 + ey1) / 2, BENCH_H - 0.025),
-             color=C["table"]),
-        dict(name="bay_bench_body", group="arm_bay", type="cuboid",
-             size=(x1 - (x0 - 0.04), ey1 - ey0 - 0.04, BENCH_H - 0.05),
-             xyz=((x0 - 0.04 + x1) / 2, (ey0 + ey1) / 2, (BENCH_H - 0.05) / 2), color=C["cabinet"]),
-    ]
-    fw, fz = 0.05, 0.02 + 0.001
-    out += [
-        dict(name="floor_tape_front", group="safety", type="cuboid",
-             size=(bx - (x0 - 0.04) + fw / 2, fw, 0.002), xyz=((x0 - 0.04 + bx + fw / 2) / 2, fy0, fz), color=C["tape"]),
-        dict(name="floor_tape_right", group="safety", type="cuboid",
-             size=(fw, fy1 - fy0 - fw, 0.002), xyz=(bx, (fy0 + fy1) / 2, fz), color=C["tape"]),
-        dict(name="floor_tape_back", group="safety", type="cuboid",
-             size=(bx - (x0 - 0.04) + fw / 2, fw, 0.002), xyz=((x0 - 0.04 + bx + fw / 2) / 2, fy1, fz), color=C["tape"]),
-    ]
-    return out
-
-
 STATIC.extend(_transfer_specs())
 STATIC.extend(_pack_specs())
 STATIC.extend(_mount_specs())
-STATIC.extend(_bay_specs())
 
 SHOW_MARKERS = False
 
@@ -530,7 +563,8 @@ def card_objects():
     cells = ([(c, r) for c in range(SLOTS["cols"]) for r in range(SLOTS["rows"])]
              if fill == "all" else ([] if fill == "none" else list(fill)))
     return [dict(name=f"card_c{c}r{r}", group="cards", type="cuboid",
-                 size=CARD["size"], xyz=slot_xyz(c, r), color=C["card"]) for c, r in cells]
+                 size=CARD["size"], xyz=slot_xyz(c, r),
+                 color=C["card"]) for c, r in cells]
 
 
 # ----------------------------------------------------------------------------

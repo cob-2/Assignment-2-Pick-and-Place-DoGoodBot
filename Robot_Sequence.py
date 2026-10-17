@@ -11,6 +11,8 @@ import scene_config as cfg
 import cobotta_collision_detection as cell
 import vault_sequence as vault
 import ur3e_outfeed as outfeed
+import kawasaki_collision_detection as kcd
+import ur3e_collision_detection as ucd
  
  
 # ----------------------------------------------------------------------------
@@ -55,8 +57,11 @@ class StopGate:
  
     def __init__(self, env, ui):
         self.env, self.ui = env, ui
+        self.view = None
  
     def step(self, dt=0.0):
+        if self.view is not None:
+            self.view.update()
         self.env.step(dt)
         if self.ui.get("estop"):
             raise Halt
@@ -70,16 +75,108 @@ def checker_cfg():
     g = cell.CONFIG["gripper"]
     return dict(
         robot=dict(link_radii=TASK["link_radii"], tool_length=TASK["tool_length"],
+                   link_boxes=cell.CONFIG["robot"]["link_boxes"],
                    home_deg=TASK["home_deg"]),
         motion=dict(steps=TASK["steps"], check_every=TASK["check_every"],
                     margin=TASK["margin"], jaw_margin=TASK["jaw_margin"],
                     replan_tries=TASK["replan_tries"], dt=TASK["dt"],
                     point_spacing=TASK["point_spacing"]),
         gripper=dict(open=g["open"], closed=g["closed"], finger=g["finger"],
-                     clearance=g["clearance"]),
+                     pad=g["pad"], pad_xyz=g["pad_xyz"], clearance=g["clearance"]),
     )
  
  
+# ----------------------------------------------------------------------------
+# COLLISION VIEW
+# ----------------------------------------------------------------------------
+VIEW = dict(box=(0.20, 0.85, 0.95, 0.22), ellipsoid=(1.00, 0.45, 0.10, 0.30),
+            pad=0.120, samples=300)
+
+
+class CollisionView:
+    def __init__(self, env, task):
+        self.env, self.task = env, task
+        self.on = False
+        self.boxes = []
+        self.arms = []
+
+    def sources(self):
+        out = [(self.task.robot, lambda r: cell.arm_ellipsoids(r, self.task.cfg, r.q))]
+        if self.task.vault is not None:
+            out.append((self.task.vault.robot, lambda r: kcd.arm_ellipsoids(r, r.q)))
+        if self.task.outfeed is not None:
+            out.append((self.task.outfeed.robot, lambda r: ucd.arm_ellipsoids(r, r.q)))
+        return out
+
+    def envelope(self):
+        rng = np.random.default_rng(0)
+        out = []
+        for robot, _ in self.sources():
+            pts = []
+            for _ in range(VIEW["samples"]):
+                q = np.array([rng.uniform(*l.qlim) for l in robot.links])
+                pts += [T.t for T in robot.fkine_all(q)]
+            out.append(np.asarray(pts, dtype=float))
+        return out
+
+    def in_reach(self, ob, envelope):
+        for pts in envelope:
+            rel = np.abs((pts - ob.pose.t) @ ob.pose.R) - ob.half
+            d = np.linalg.norm(np.clip(rel, 0.0, None), axis=1)
+            if float(d.min()) <= VIEW["pad"]:
+                return True
+        return False
+
+    def build(self):
+        envelope = self.envelope()
+        for ob in self.task.world.obstacles:
+            if not self.in_reach(ob, envelope):
+                continue
+            shape = geometry.Cuboid(scale=list(np.asarray(ob.half) * 2), pose=ob.pose,
+                                    color=VIEW["box"])
+            self.env.add(shape)
+            self.boxes.append((shape, ob))
+        for robot, fn in self.sources():
+            shapes = []
+            for item in fn(robot):
+                shape = geometry.Ellipsoid(radii=list(np.asarray(item[-1], dtype=float)),
+                                           color=VIEW["ellipsoid"])
+                self.env.add(shape)
+                shapes.append(shape)
+            self.arms.append((robot, fn, shapes))
+        self.place()
+
+    def alpha(self, shape, value):
+        if not self.task.headless:
+            shape.set_alpha(value)
+
+    def place(self):
+        for shape, ob in self.boxes:
+            shape.T = ob.pose.A
+            self.alpha(shape, VIEW["box"][3] if (self.on and ob.active) else 0.0)
+        for robot, fn, shapes in self.arms:
+            for shape, item in zip(shapes, fn(robot)):
+                centre, R, _ = item[-3:]
+                T = np.eye(4)
+                T[:3, :3] = R
+                T[:3, 3] = centre
+                shape.T = T
+                self.alpha(shape, VIEW["ellipsoid"][3] if self.on else 0.0)
+
+    def update(self):
+        if self.on:
+            self.place()
+
+    def toggle(self):
+        self.on = not self.on
+        if self.on and not self.boxes:
+            self.build()
+        else:
+            self.place()
+        self.env.step(0.0)
+        return self.on
+
+
 # ----------------------------------------------------------------------------
 # THE ARM'S HAND
 # ----------------------------------------------------------------------------
@@ -146,8 +243,10 @@ def approach(xy, top_z, depth=None, lift=None):
  
  
 def spot_poses(spot):
-    g = grasp(spot["xy"], spot["top"], spot.get("depth"))
-    return g, approach(spot["xy"], spot["top"], spot.get("depth"), spot.get("lift"))
+    dx, dy = spot.get("offset", (0.0, 0.0))
+    xy = (spot["xy"][0] + dx, spot["xy"][1] + dy)
+    g = grasp(xy, spot["top"], spot.get("depth"))
+    return g, approach(xy, spot["top"], spot.get("depth"), spot.get("lift"))
  
  
 # ----------------------------------------------------------------------------
@@ -188,6 +287,8 @@ class   PackagingTask:
         ur3e = robots.get(outfeed.ARM)
         self.outfeed = (outfeed.OutfeedArm(self.env, ur3e, self.shapes, self.gate, say=self.say)
                         if ur3e is not None else None)
+        self.view = CollisionView(self.env, self)
+        self.gate.view = self.view
         if not headless:
             self.add_panel()
         self.env.step(0.0)
@@ -262,11 +363,13 @@ class   PackagingTask:
             lid_seated=dict(xy=p["holder_xy"],
                             top=cfg.BENCH_H + p["wall"] + slab_h + p["lid"][2]
                             + p["handle"][2], depth=0.012),
-            box=dict(xy=p["holder_xy"], top=cfg.BENCH_H + p["outer"][2],
-                     depth=p["grip_below_rim"]),
+            box=dict(xy=p["holder_xy"],
+                     top=cfg.BENCH_H + p["outer"][2] + p["lid"][2] + p["handle"][2],
+                     depth=p["handle_grip"]),
             outfeed=dict(xy=p["outfeed_xy"],
-                         top=cfg.BENCH_H + p["pad"][2] + p["outer"][2],
-                         depth=p["grip_below_rim"], lift=0.075),
+                         top=cfg.BENCH_H + p["pad"][2] + p["outer"][2] + p["lid"][2]
+                         + p["handle"][2],
+                         depth=p["handle_grip"], lift=0.075),
         )
  
     def near(self, xy, top, reach=0.075, band=0.25):
@@ -295,6 +398,9 @@ class   PackagingTask:
             if inside and floor - tol <= base <= floor + window:
                 out.append(ob.name)
         return out
+ 
+    def jaw_links(self):
+        return (len(self.cfg["robot"]["link_boxes"]),)
  
     def move_linear(self, T_goal, steps=12):
         ctrl = self.ctrl
@@ -325,7 +431,9 @@ class   PackagingTask:
         g, a = spot_poses(s)
         ok = ctrl.move_to_pose(a)
         rides = self.riders(name)
-        with ctrl.ignoring(self.near(s["xy"], s["top"])):
+        own = list(dict.fromkeys([name, grip] + rides))
+        nearby = [n for n in self.near(s["xy"], s["top"]) if n not in own]
+        with ctrl.ignoring(own), ctrl.ignoring(nearby, links=self.jaw_links()):
             ok &= self.move_linear(g)
             ctrl.grasp(self.shapes[name], self.world.get(name), w)
             for r in rides:
@@ -338,7 +446,8 @@ class   PackagingTask:
         names = [ob.name for _, ob, _ in ctrl.carried]
         g, a = spot_poses(s)
         ok = ctrl.move_to_pose(a)
-        with ctrl.ignoring(names + self.near(s["xy"], s["top"])):
+        nearby = [n for n in self.near(s["xy"], s["top"]) if n not in names]
+        with ctrl.ignoring(names), ctrl.ignoring(nearby, links=self.jaw_links()):
             ok &= self.move_linear(g)
             ctrl.release(resting)
             ok &= self.move_linear(a)
@@ -379,6 +488,9 @@ class   PackagingTask:
             def cb(_):
                 self.ui["request"] = what
             return cb
+
+        def view_toggle(_):
+            self.say("collision boxes on" if self.view.toggle() else "collision boxes off")
  
         self.status = swift.Label(desc="Starting up")
         self.env.add(self.status)
@@ -399,6 +511,7 @@ class   PackagingTask:
         self.env.add(swift.Button(estop, desc="EMERGENCY STOP"))
         self.env.add(swift.Button(reset, desc="E-STOP RELEASE"))
         self.env.add(swift.Button(request("restart"), desc="RESTART SCENE"))
+        self.env.add(swift.Button(view_toggle, desc="COLLISION BOXES"))
  
     def say(self, text):
         print(f"   {text}")
@@ -472,8 +585,7 @@ class   PackagingTask:
         self.place(sp["lid_seated"], SE3(*cfg.holder_lid_xyz()))
  
         print("5. set the finished box on the outfeed pad")
-        self.pick("holder_base", sp["box"], grip="holder_wall_py",
-                  width=p["outer"][1])
+        self.pick("holder_base", sp["box"], grip="box_handle")
         rest = SE3(p["outfeed_xy"][0], p["outfeed_xy"][1],
                    cfg.BENCH_H + p["pad"][2] + p["wall"] / 2)
         self.place(sp["outfeed"], rest)
