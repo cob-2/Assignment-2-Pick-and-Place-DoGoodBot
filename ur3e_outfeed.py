@@ -18,12 +18,13 @@ TASK = dict(
     open_gap=0.060,         # RG2 jaw gap when approaching the box (m)
     clearance=0.001,        # each side, added to the box width when closing on it
     grip_below_rim=0.030,   # pads this far below the box rim (the COBOTTA uses 20 mm; a
-                            # little deeper gives the bulkier RG2 body more room over the lid handle)
+                            # little deeper keeps the bulkier RG2 body clear of the box)
     pick_lift=0.065,        # approach height above the grasp at the pad
     drop_lift=0.065,        # and above the drop on the spur
     min_lift=0.035,         # lowest approach that still keeps the pads above the box rim
-    transit_z=1.20,         # TCP height while carrying the box round to the belt
-    transit_r=0.30,         # and its distance from the UR3e base axis (stays clear of
+    transit_z=1.15,         # TCP height while carrying the box round to the belt (higher
+                            # stretches the arm out to its elbow singularity)
+    transit_r=0.20,         # and at least this far from the UR3e base axis (stays clear of
                             # the shoulder singularity a straight line would pass through)
     slow=0.10,              # RMRC TCP speed near the box (m/s)
     fast=0.25,              # RMRC TCP speed in transit (m/s)
@@ -70,8 +71,11 @@ def skew(v):
 class OutfeedArm:
     """The UR3e's part of the cycle. shapes: name -> Swift shape (shared with the COBOTTA task)."""
 
-    def __init__(self, env, robot, shapes, gate, say=print):
+    def __init__(self, env, robot, shapes, gate, say=print, others=()):
+        """others: (name, robot, link_radii, tool_length) for arms the UR3e must keep
+        clear of (the parked COBOTTA); their links are re-read on every sync()."""
         self.env, self.robot, self.shapes, self.gate, self.say = env, robot, shapes, gate, say
+        self.others = list(others)
         # fkine() is the bare flange (as for the COBOTTA) and the TCP is added here.
         # The RG2's grip point drops as the jaws close, so plan with the grip point at
         # the gap that holds the box: the pads then close onto the planned height.
@@ -80,6 +84,7 @@ class OutfeedArm:
         self.home = np.array(cfg.ROBOTS[ARM]["q0"], dtype=float)
         self.robot.q = self.home.copy()
         self.world = ucd.world_from_scene(cfg)
+        self.sync_others()
         self.opening = TASK["open_gap"]
         self.set_jaws(TASK["open_gap"])
         self.lifts = self.fit_lifts()
@@ -106,6 +111,34 @@ class OutfeedArm:
             shape = self.shapes.get(ob.name)
             if shape is not None and ob.name not in self.held():
                 ob.pose = SE3(np.array(shape.T), check=False)
+        self.sync_others()
+
+    def sync_others(self):
+        """Each link of another arm becomes a box from joint to joint, as thick as its
+        link radius, plus one for its hand, posed where the arm is now."""
+        for name, arm, radii, tool in self.others:
+            frames = [np.asarray(T.A if hasattr(T, "A") else T) for T in arm.fkine_all(arm.q)]
+            pts = [F[:3, 3] for F in frames]
+            pts.append((frames[-1] @ [0, 0, tool, 1])[:3])
+            for i in range(len(pts) - 1):
+                a, b = pts[i], pts[i + 1]
+                d = b - a
+                length = float(np.linalg.norm(d))
+                if length < 1e-6:
+                    continue
+                z = d / length
+                x = np.cross([1.0, 0, 0] if abs(z[0]) < 0.9 else [0, 1.0, 0], z)
+                x /= np.linalg.norm(x)
+                pose = SE3.Rt(np.column_stack((x, np.cross(z, x), z)), (a + b) / 2)
+                r = radii[min(i, len(radii) - 1)]
+                key = f"{name}_link{i}"
+                if key in self.world.names():
+                    ob = self.world.get(key)
+                    ob.pose = pose
+                    if np.allclose(ob.half, [r, r, length / 2 + r]):
+                        continue
+                    self.world.obstacles.remove(ob)
+                self.world.add_box(key, (2 * r, 2 * r, length + 2 * r), pose)
 
     def riders(self, name, window=0.30, tol=0.004):
         host = self.world.get(name)
@@ -254,16 +287,21 @@ class OutfeedArm:
         return np.array(qs), (f"{len(qs)} steps, peak joint speed {worst_qd:.2f} rad/s, "
                               f"min manipulability {min_m:.3f}, error {err * 1000:.2f} mm")
 
-    def arc_via(self, T_from, T_to, z, r, n=8):
+    def arc_via(self, T_from, T_to, z, r_min, n=8):
         """Points on an arc round the base axis from above T_from to above T_to, at
-        height z and radius r: a straight line between the pad and the belt passes
-        within a few cm of the base axis, where the UR3e is singular."""
-        b = self.robot.base.t
-        a0 = np.arctan2(*(T_from.t[:2] - b[:2])[::-1])
-        a1 = np.arctan2(*(T_to.t[:2] - b[:2])[::-1])
+        height z, the radius blending from the start's to the goal's but never under
+        r_min: a straight line between the pad and the belt passes close to the base
+        axis, where the UR3e is singular."""
+        b = self.robot.base.t[:2]
+        d0, d1 = T_from.t[:2] - b, T_to.t[:2] - b
+        a0, a1 = np.arctan2(d0[1], d0[0]), np.arctan2(d1[1], d1[0])
+        r0, r1 = np.linalg.norm(d0), np.linalg.norm(d1)
         da = (a1 - a0 + pi) % (2 * pi) - pi           # the short way round
-        return [(b[0] + r * np.cos(a0 + t * da), b[1] + r * np.sin(a0 + t * da), z)
-                for t in np.linspace(0.0, 1.0, n)[1:-1]]
+        out = []
+        for t in np.linspace(0.0, 1.0, n)[1:-1]:
+            r = max(r_min, r0 + t * (r1 - r0))
+            out.append((b[0] + r * np.cos(a0 + t * da), b[1] + r * np.sin(a0 + t * da), z))
+        return out
 
     # -- checked motion -------------------------------------------------------
     def clear(self, qs):
@@ -362,10 +400,10 @@ class OutfeedArm:
         self.parts = [(n, F.inv() * self.world.get(n).pose) for n in names]
         for n in names:
             self.world.get(n).active = False
-        # one exact box around the whole closed mailer, lid handle included
+        # one exact box around the whole mailer
         p = cfg.PACK
         base = self.world.get("holder_base").pose
-        h = p["outer"][2] + p["handle"][2]
+        h = p["outer"][2]
         size = (p["outer"][0], p["outer"][1], h)
         centre = base * SE3(0, 0, -p["wall"] / 2 + h / 2)
         self.load = [(size, F.inv() * centre)]
@@ -390,7 +428,7 @@ class OutfeedArm:
         self.sync()
         self.move_jaws(TASK["open_gap"])
 
-        print("7. UR3e picks the boxed card off the outfeed pad")
+        print("6. UR3e picks the boxed card off the outfeed pad")
         over_pad = self.grip_pose(pad, lifted=True)
         via = self.arc_via(self.tcp_pose(self.robot.q), over_pad,
                            TASK["transit_z"], TASK["transit_r"])
@@ -409,7 +447,7 @@ class OutfeedArm:
                 return False
         ok = True
 
-        print("8. UR3e carries it to the infeed belt and sets it down")
+        print("7. UR3e carries it to the infeed belt and sets it down")
         over_spur = self.grip_pose(spur, lifted=True)
         via = self.arc_via(self.tcp_pose(self.robot.q), over_spur,
                            TASK["transit_z"], TASK["transit_r"])
@@ -422,7 +460,7 @@ class OutfeedArm:
                 ok &= self.straight(self.grip_pose(spur, lifted=True), TASK["slow"],
                                     "clear of the box")
 
-        print("9. UR3e back home, belts carry the box out")
+        print("8. UR3e back home, belts carry the box out")
         self.move_joint(self.home)
         self.run_belts()
         self.say("Box is on the conveyor")

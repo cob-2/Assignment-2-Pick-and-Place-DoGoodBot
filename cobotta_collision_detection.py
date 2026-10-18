@@ -1,4 +1,3 @@
-"""COBOTTA collision detection (point cloud vs link ellipsoids), motion control and a test cell. Explained in CODE_GUIDE.md."""
 
 import os
 from contextlib import contextmanager
@@ -77,12 +76,9 @@ CONFIG = dict(
 
     box=dict(inner=(0.090, 0.018, 0.150),
              wall=0.003,
-             lid=(0.086, 0.016, 0.010),
-             handle=(0.020, 0.014, 0.030),
              drop=0.045,
              grip_below_rim=0.020,
-             colour=(0.72, 0.58, 0.38, 1.0),
-             lid_zone="staging"),
+             colour=(0.72, 0.58, 0.38, 1.0)),
 
     camera=dict(height=0.32, mast=0.030, body=0.060, offset=0.075,
                 colour=(0.10, 0.10, 0.12, 1.0)),
@@ -482,13 +478,6 @@ class Cell:
                       base * SE3(side * (ix + w) / 2, 0, (w + iz) / 2), b["colour"])
         self.box_parts = [n for n in self.shapes if n.startswith("box_")]
 
-        self.lid_size, self.handle_size = b["lid"], b["handle"]
-        lid_rest = self.resting_pose(b["lid_zone"], self.lid_size[2])
-        self._box("box_lid", self.lid_size, lid_rest, b["colour"])
-        self._box("box_handle", self.handle_size,
-                  lid_rest * SE3(0, 0, (self.lid_size[2] + self.handle_size[2]) / 2),
-                  (0.60, 0.48, 0.30, 1.0))
-
         self.robot = COBOTTA(SE3(*c["robot"]["xyz"]) * SE3.RPY(list(c["robot"]["rpy"])))
         self.robot.q = np.deg2rad(c["robot"]["home_deg"])
         self.robot.add_to_env(self.env)
@@ -603,17 +592,10 @@ class Cell:
 
         print("4. pack the card into the holder")
         b = cfg["box"]
-        lid_h, handle_h = self.lid_size[2], self.handle_size[2]
         self.place("packing", card_h, dz=b["wall"] + b["drop"],
                    resting=self.resting_pose("packing", card_h, dz=b["wall"]))
 
-        print("5. cap it with the lid")
-        self.pick("box_lid", b["lid_zone"], lid_h + handle_h, depth=0.012,
-                  grip="box_handle")
-        self.place("packing", lid_h + handle_h, dz=b["wall"] + card_h, depth=0.012,
-                   resting=self.resting_pose("packing", lid_h, dz=b["wall"] + card_h))
-
-        print("6. deliver the holder")
+        print("5. deliver the holder")
         below = b["grip_below_rim"]
         self.pick("box_base", "packing", self.box_outer[2], depth=below,
                   grip="box_wall_py", width=self.box_outer[1])

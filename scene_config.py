@@ -17,7 +17,7 @@ FRONT_Y = -0.50
 BACK_Y = FRONT_Y + CELL_D
 CELL_YC = (FRONT_Y + BACK_Y) / 2
 CASE_X1 = CELL_W / 2 - 0.10
-CASE_X2 = CELL_W / 2 + 0.22
+CASE_X2 = CELL_W / 2 + 0.40      # outer right wall; the Kawasaki swings back to x~1.07 when it turns round
 BENCH_H = 0.90
 GLASS_H = 1.20
 PANEL_T = 0.012
@@ -383,16 +383,12 @@ def transfer_grasp_xyz(depth=0.030):
 # ----------------------------------------------------------------------------
 PACK = dict(
     holder_xy=(-0.22, 0.08),
-    lid_xy=(-0.30, 0.26),
     outfeed_xy=(-0.20, -0.09),
     inner=(0.090, 0.018, 0.150),
     wall=0.003,
-    lid=(0.086, 0.016, 0.010),
-    handle=(0.020, 0.014, 0.030),
     pad=(0.13, 0.09, 0.006),
     drop=0.045,
     grip_below_rim=0.020,
-    handle_grip=0.008,
 )
 PACK["outer"] = (PACK["inner"][0] + 2 * PACK["wall"],
                  PACK["inner"][1] + 2 * PACK["wall"],
@@ -420,13 +416,7 @@ def _pack_specs():
                         xyz=(hx + side * (ix + w) / 2, hy, BENCH_H + w + iz / 2),
                         color=C["mailer"]))
 
-    lx, ly = p["lid_xy"]
     out += [
-        dict(name="box_lid", group="pack", type="cuboid", size=p["lid"],
-             xyz=(lx, ly, BENCH_H + p["lid"][2] / 2), color=C["mailer"]),
-        dict(name="box_handle", group="pack", type="cuboid", size=p["handle"],
-             xyz=(lx, ly, BENCH_H + p["lid"][2] + p["handle"][2] / 2),
-             color=C["rack"]),
         dict(name="outfeed_pad", group="pack", type="cuboid", size=p["pad"],
              xyz=(p["outfeed_xy"][0], p["outfeed_xy"][1], BENCH_H + p["pad"][2] / 2),
              color=C["nest"]),
@@ -437,11 +427,6 @@ def _pack_specs():
 def holder_slab_xyz():
     hx, hy = PACK["holder_xy"]
     return (hx, hy, BENCH_H + PACK["wall"] + SLAB["h"] / 2)
-
-
-def holder_lid_xyz():
-    hx, hy = PACK["holder_xy"]
-    return (hx, hy, BENCH_H + PACK["wall"] + SLAB["h"] + PACK["lid"][2] / 2)
 
 
 # ----------------------------------------------------------------------------
@@ -614,7 +599,6 @@ FRAMES = dict(
             INSPECT_XY[1] - CAM["standoff"] + CAM["head"][1] / 2 + CAM["barrel"],
             BENCH_H + CAM["height"] + CAM["head"][2] / 2),
     holder=holder_slab_xyz(),
-    lid_stand=(PACK["lid_xy"][0], PACK["lid_xy"][1], BENCH_H + PACK["lid"][2]),
     outfeed=(PACK["outfeed_xy"][0], PACK["outfeed_xy"][1], BENCH_H + PACK["pad"][2]),
     transfer_nest=(TRANSFER["x"], TRANSFER["y"], BENCH_H + RACK["base_h"] + SLAB["h"]),
     display=(0.30, -0.44, 1.32),
