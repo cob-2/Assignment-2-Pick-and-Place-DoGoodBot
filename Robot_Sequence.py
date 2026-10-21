@@ -90,7 +90,7 @@ def checker_cfg():
 # COLLISION VIEW
 # ----------------------------------------------------------------------------
 VIEW = dict(box=(0.20, 0.85, 0.95, 0.22), ellipsoid=(1.00, 0.45, 0.10, 0.30),
-            pad=0.120, samples=300)
+             pad=0.120, samples=300, parked=SE3(0, 0, -100).A)
 
 
 class CollisionView:
@@ -139,8 +139,11 @@ class CollisionView:
         for robot, fn in self.sources():
             shapes = []
             for item in fn(robot):
-                shape = geometry.Ellipsoid(radii=list(np.asarray(item[-1], dtype=float)),
-                                           color=VIEW["ellipsoid"])
+                radii = np.asarray(item[-1], dtype=float)
+                if hasattr(geometry, "Ellipsoid"):
+                    shape = geometry.Ellipsoid(radii=list(radii), color=VIEW["ellipsoid"])
+                else:                    # older spatialgeometry: the box around the ellipsoid
+                    shape = geometry.Cuboid(scale=list(radii * 2), color=VIEW["ellipsoid"])
                 self.env.add(shape)
                 shapes.append(shape)
             self.arms.append((robot, fn, shapes))
@@ -151,16 +154,19 @@ class CollisionView:
             shape.set_alpha(value)
 
     def place(self):
+        # Swift only re-sends a shape's pose after it is added, not its colour, so a
+        # hidden shape is also parked out of sight rather than relying on opacity alone.
         for shape, ob in self.boxes:
-            shape.T = ob.pose.A
-            self.alpha(shape, VIEW["box"][3] if (self.on and ob.active) else 0.0)
+            shown = self.on and ob.active
+            shape.T = ob.pose.A if shown else VIEW["parked"]
+            self.alpha(shape, VIEW["box"][3] if shown else 0.0)
         for robot, fn, shapes in self.arms:
             for shape, item in zip(shapes, fn(robot)):
                 centre, R, _ = item[-3:]
                 T = np.eye(4)
                 T[:3, :3] = R
                 T[:3, 3] = centre
-                shape.T = T
+                shape.T = T if self.on else VIEW["parked"]
                 self.alpha(shape, VIEW["ellipsoid"][3] if self.on else 0.0)
 
     def update(self):

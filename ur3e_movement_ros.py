@@ -21,6 +21,7 @@ ROS = dict(
     # ur_robot_driver status (ROS 1, launched in the /ur namespace)
     safety_mode="/ur/ur_hardware_interface/safety_mode",
     program_running="/ur/ur_hardware_interface/robot_program_running",
+    speed_scaling="/ur/speed_scaling_factor",
     play="/ur/ur_hardware_interface/dashboard/play",
 )
 
@@ -37,6 +38,8 @@ REAL = dict(
     speed_scale=0.5,        # 1.0 = the simulated timing; 0.5 = every move takes twice as long
     start_tol=0.05,         # rad; a path whose first point is further than this from the arm is refused
     end_tol=0.02,           # rad; the arm must end this close to the last point
+    moving_tol=0.002,       # rad; less joint motion than this over stall_time counts as stopped
+    stall_time=10.0,        # s
     settle=0.5,             # s to wait after a trajectory's last point
     grip_wait=1.5,          # s for the RG2 to finish opening/closing
     open_gap=None,          # real RG2 open width (m) for the collision checker; None keeps TASK's
@@ -80,7 +83,9 @@ class UR3eROS:
         if not self.client.is_connected:
             raise RuntimeError(f"can't reach rosbridge at {host}:{port}")
         self._q = None
-        self.safety, self.running = None, None
+        self.safety, self.running, self.scaling = None, None, None
+        self.scaling_topic = roslibpy.Topic(self.client, ROS["speed_scaling"], "std_msgs/Float64")
+        self.scaling_topic.subscribe(lambda m: setattr(self, "scaling", float(m["data"])))
         self.safety_topic = roslibpy.Topic(self.client, ROS["safety_mode"], "ur_dashboard_msgs/SafetyMode")
         self.safety_topic.subscribe(lambda m: setattr(self, "safety", int(m["mode"])))
         self.running_topic = roslibpy.Topic(self.client, ROS["program_running"], "std_msgs/Bool")
@@ -107,6 +112,8 @@ class UR3eROS:
 
     # -- robot status -----------------------------------------------------------
     def stopped(self):
+        """Why the robot can't move right now, or None if it can. Status the driver
+        hasn't published yet counts as fine, so a driver without these topics still runs."""
         if self.safety is not None and self.safety not in SAFETY_NORMAL:
             return SAFETY_NAMES.get(self.safety, f"safety mode {self.safety}")
         if self.running is False:
@@ -134,7 +141,8 @@ class UR3eROS:
             time.sleep(0.2)
 
     def restart_program(self, timeout=20.0):
-        """Ask the driver's dashboard to press Play, else wait for someone to press it on the pendant."""
+        """Get the External Control program running again: ask the driver's dashboard
+        to press Play, else wait for someone to press it on the pendant."""
         if self.running is not False:
             return
         try:
@@ -164,14 +172,41 @@ class UR3eROS:
                                time_from_start=dict(secs=int(t), nsecs=int((t % 1) * 1e9))))
         self.command.publish(self.roslibpy.Message(dict(joint_names=JOINT_NAMES, points=points)))
         try:
-            self.wait(len(qs) * dt + REAL["settle"])
+            self.play_out(len(qs) * dt)
+            self.wait_until_there(qs[-1])
+            self.wait(REAL["settle"])
         except EStop:
             self.stop()                 # don't let the rest play out when the program comes back
             raise
-        err = float(np.max(np.abs(self.joints() - np.asarray(qs[-1]))))
-        if err > REAL["end_tol"]:
-            raise RuntimeError(f"arm stopped {err:.3f} rad short of the path end "
-                               "(protective stop, speed slider or program paused?)")
+
+    def play_out(self, duration):
+        """Wait until the controller has played `duration` seconds of the trajectory. The
+        scaled controller advances through it at the pendant speed slider's rate, which the
+        driver publishes as speed_scaling_factor, so trajectory time is that factor
+        integrated over wall time (at 20% a 4 s path takes 20 s)."""
+        played, t_last = 0.0, time.time()
+        while played < duration:
+            self.wait(0.02)
+            now = time.time()
+            played += (now - t_last) * (self.scaling if self.scaling is not None else 1.0)
+            t_last = now
+
+    def wait_until_there(self, q_end):
+        """Let the arm settle onto the end of the path. Without a speed_scaling_factor
+        topic the played-out time is only a guess, so keep waiting while it still moves."""
+        q_end = np.asarray(q_end, dtype=float)
+        last, last_moved = self.joints(), time.time()
+        while True:
+            q = self.joints()
+            err = float(np.max(np.abs(q - q_end)))
+            if err <= REAL["end_tol"]:
+                return
+            if np.max(np.abs(q - last)) > REAL["moving_tol"]:
+                last, last_moved = q, time.time()
+            elif time.time() - last_moved > REAL["stall_time"]:
+                raise RuntimeError(f"arm stopped {err:.3f} rad short of the path end "
+                                   "(protective stop or program paused?)")
+            self.wait(0.05)
 
     def stop(self):
         """An empty trajectory makes the controller stop where it is."""
@@ -188,7 +223,7 @@ class UR3eROS:
     def close(self):
         try:
             self.command.unadvertise()
-            for topic in (self.states, self.safety_topic, self.running_topic):
+            for topic in (self.states, self.safety_topic, self.running_topic, self.scaling_topic):
                 topic.unsubscribe()
         finally:
             self.client.terminate()
@@ -282,6 +317,10 @@ class RealOutfeedArm(OutfeedArm):
 
     # -- e-stop recovery --------------------------------------------------------
     def recover(self, why, qs):
+        """The arm stopped part way along qs. Wait for the pendant reset, then a
+        deliberate 'resume', and return the path that finishes the move from where the
+        arm is now: a short checked jtraj onto the nearest point of qs, then the rest
+        of qs, so straight-line moves stay straight."""
         state(f"E-STOPPED ({why}) - arm halted, sequence paused")
         self.ur.stop()
         self.ur.wait_until_reset()
@@ -394,10 +433,13 @@ def apply_config(robot):
 
 def check(robot, ur):
     q = ur.joints()
+    robot.tool = SE3()                          # the bare flange, not the RG2 grip point
     T = SE3(robot.base).inv() * robot.fkine(q)
     print("joints (deg):", np.round(np.degrees(q), 2))
     print("flange in the UR3e base frame (m):", np.round(T.t, 4))
     print("flange rpy (deg):", np.round(T.rpy(unit="deg"), 2))
+    time.sleep(0.5)
+    print("speed slider:", "not published" if ur.scaling is None else f"{ur.scaling * 100:.0f}%")
     print("Compare with the pendant (Move tab, feature 'Base', TCP set to the bare flange).")
 
 
@@ -410,6 +452,8 @@ def main():
     ap.add_argument("--port", type=int, default=ROS["port"])
     ap.add_argument("--estop-at", type=int, default=None, metavar="N",
                     help="dry run only: pretend the e-stop is pressed during move N")
+    ap.add_argument("--goto", type=float, nargs=6, default=None, metavar="DEG",
+                    help="only move to these six joint angles (degrees) and stop")
     args = ap.parse_args()
 
     robot = load_robot()
@@ -428,6 +472,11 @@ def main():
             check(robot, ur)
             return
         arm = RealOutfeedArm(robot, ur, confirm=args.live and not args.no_confirm)
+        if args.goto is not None:
+            state("RUNNING")
+            ok = arm.move_joint(np.radians(args.goto))
+            state("DONE" if ok else "NO SAFE PATH - not moved")
+            return
         arm.reach_report()
         state("RUNNING")
         print("5. UR3e to home")
