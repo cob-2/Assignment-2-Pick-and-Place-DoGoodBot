@@ -1,22 +1,3 @@
-"""Kawasaki RS007N (+ OnRobot RG2) collision detection: scene point cloud vs link ellipsoids.
-
-Same idea and names as cobotta_collision_detection.py so the two arms read the same:
-every scene object becomes a cloud of surface points, the arm becomes a set of
-ellipsoids, and a point p is inside an ellipsoid (centre c, axes R, radii r) when
-
-        sum( ((p - c) @ R / r) ** 2 ) < 1
-
-Difference from the COBOTTA version: the ellipsoids are not guessed from link
-radii, they were fitted to the real Kawasaki and RG2 meshes (each one is the
-smallest PCA-aligned ellipsoid that contains every vertex of its part). The
-long links (base, upper arm, forearm) are split into 2-3 ellipsoids so the
-fit stays tight. A carried slab is checked as an exact box.
-
-Run it on its own for a self-test:
-    python kawasaki_collision_detection.py            # checks every slot, hand-off and return pose
-    python kawasaki_collision_detection.py --demo     # shows what a detected collision looks like
-"""
-
 import importlib
 from contextlib import contextmanager
 
@@ -40,6 +21,12 @@ CONFIG = dict(
     reach=1.30,             # ignore scene objects further than this from the base (m)
     skip_groups=("room", "markers"),
     stand_on_tol=0.012,     # objects whose top is this close to the base height are what the arm stands on
+    rmrc_speed=0.10,        # TCP speed for straight moves into / out of a slot (m/s)
+    rmrc_dt=0.03,           # RMRC time step (s)
+    qd_max=1.5,             # joint speed limit (rad/s); faster steps are scaled down
+    manip_min=0.010,        # below this manipulability, damping switches on
+    damping_max=0.05,       # largest damping factor (lambda) at a singularity
+    rmrc_tol=0.001,         # final TCP position error accepted (m)
 )
 
 
@@ -89,7 +76,6 @@ GRIPPER_LINK = 7     # link index used for the RG2 when an obstacle lists ignore
 # SCENE POINT CLOUD
 # ============================================================================
 def surface_points(size, spacing):
-    """Points on the six faces of a box of the given size, centred on the origin."""
     hx, hy, hz = np.asarray(size, dtype=float) / 2
 
     def grid(u, v):
@@ -129,7 +115,6 @@ class Obstacle:
         return self._cache
 
     def near(self, centre, radius):
-        """Cheap test: could anything within 'radius' of 'centre' touch this obstacle?"""
         self.points()
         gap = np.maximum(0.0, np.maximum(self._lo - centre, centre - self._hi))
         return float(np.linalg.norm(gap)) < radius
@@ -153,7 +138,6 @@ class World:
 
     @contextmanager
     def ignoring(self, names):
-        """Temporarily switch obstacles off, e.g. the slab being picked and its stand."""
         obs = [self.get(n) for n in names if n in self.names()]
         previous = [o.active for o in obs]
         for o in obs:
@@ -166,7 +150,6 @@ class World:
 
 
 def spec_box(spec):
-    """A scene_config object as (size, pose); cylinders and spheres become their bounding box."""
     pose = SE3(*spec["xyz"]) * SE3.RPY(list(spec.get("rpy", (0, 0, 0))))
     if spec["type"] == "cuboid":
         return tuple(spec["size"]), pose
@@ -180,11 +163,6 @@ def spec_box(spec):
 
 
 def world_from_scene(cfg, arm=ARM, spacing=None, include_cards=True, extra=()):
-    """Build the obstacle cloud from scene_config.
-
-    Objects the arm stands on (top at or below its base) are ignored by the base
-    and turret (links 0 and 1), as in the COBOTTA checker. Objects out of reach are skipped.
-    """
     spacing = CONFIG["point_spacing"] if spacing is None else spacing
     world = World(spacing)
     base = np.asarray(cfg.ROBOTS[arm]["base_xyz"], dtype=float)
@@ -289,8 +267,6 @@ def first_collision(robot, world, q, allowed=(), carried=(), opening=None):
 
 
 def path_collision(robot, world, qs, allowed=(), carried=(), opening=None, check_every=None):
-    """First (step, contact) along a joint path, or (None, None) if it is clear.
-    The last step is always checked."""
     every = CONFIG["check_every"] if check_every is None else check_every
     n = len(qs)
     for k, q in enumerate(qs):
@@ -303,9 +279,6 @@ def path_collision(robot, world, qs, allowed=(), carried=(), opening=None, check
 
 
 def safe_jtraj(robot, world, q_goal, q_start=None, steps=None, carried=(), opening=None):
-    """jtraj from q_start (default: robot.q) to q_goal, checked for collisions.
-    Returns (qs, None) if clear, or (None, 'part/obstacle at step k') if blocked.
-    Contacts already present at the start are allowed, so a move can leave a touching pose."""
     q0 = np.asarray(robot.q if q_start is None else q_start, dtype=float)
     qs = jtraj(q0, np.asarray(q_goal, dtype=float), steps or CONFIG["steps"]).q
     start = contacts(robot, world, q0, carried, opening)
@@ -314,7 +287,6 @@ def safe_jtraj(robot, world, q_goal, q_start=None, steps=None, carried=(), openi
 
 
 def ik_error(robot, q, T):
-    """(position error in m, rotation error in rad) of fkine(q) against target T."""
     A = robot.fkine(q)
     dR = A.R.T @ T.R
     ang = float(np.arccos(np.clip((np.trace(dR) - 1) / 2, -1.0, 1.0)))
@@ -322,9 +294,6 @@ def ik_error(robot, q, T):
 
 
 def solve_ik(robot, T, seeds, pos_tol=1e-3, rot_tol=np.radians(1.0)):
-    """ikine_LM from each seed in turn; an answer only counts if fkine really lands on T
-    (within pos_tol / rot_tol) and every joint is inside its limits. Some toolbox versions
-    report success for answers that are a few degrees off, which tilts the gripper."""
     for s in seeds:
         if s is None:
             continue
@@ -345,23 +314,54 @@ def solve_ik(robot, T, seeds, pos_tol=1e-3, rot_tol=np.radians(1.0)):
     return None
 
 
-def straight_path(robot, T_goal, q_start=None, steps=15, seeds=()):
-    """Joint path that moves the TCP in a straight line to T_goal (IK at each step,
-    seeded with the previous answer). Use it to go into / out of a groove: a jtraj
-    lift curves sideways and can scrape the neighbouring slab. Returns None if IK fails."""
-    q = np.asarray(robot.q if q_start is None else q_start, dtype=float)
+def manipulability(J):
+    return float(np.sqrt(max(np.linalg.det(J @ J.T), 0.0)))
+
+
+def rmrc_path(robot, T_goal, q_start=None, steps=15):
+    c = CONFIG
+    dt = c["rmrc_dt"]
+    q = np.asarray(robot.q if q_start is None else q_start, dtype=float).copy()
     T0 = robot.fkine(q)
-    qs = [q]
-    for a in np.linspace(0.0, 1.0, steps)[1:]:
-        T = SE3.Rt(T_goal.R, T0.t + a * (T_goal.t - T0.t))
-        q_next = solve_ik(robot, T, [q, qs[0], *seeds])
-        if q_next is None:
-            return None
-        if np.max(np.abs(q_next - q)) > np.radians(30):   # a jump = IK switched to another arm configuration
-            return None
-        q = q_next
-        qs.append(q)
-    return np.array(qs)
+    dist = float(np.linalg.norm(T_goal.t - T0.t))
+    n = max(steps, int(np.ceil(dist / c["rmrc_speed"] / dt)))
+    lim = np.asarray(robot.qlim)
+    qs, worst_qd, min_m, err = [q.copy()], 0.0, np.inf, np.inf
+    for k in range(1, n + 15):                           # a few extra steps to settle
+        tau = min(k / n, 1.0)
+        s = 10 * tau ** 3 - 15 * tau ** 4 + 6 * tau ** 5
+        T_des = T0.interp(T_goal, s)
+        T_now = robot.fkine(q)
+        v = (T_des.t - T_now.t) / dt
+        Re = T_des.R @ T_now.R.T
+        w = 0.5 * np.array([Re[2, 1] - Re[1, 2], Re[0, 2] - Re[2, 0], Re[1, 0] - Re[0, 1]]) / dt
+        J = np.asarray(robot.jacob0(q))
+        m = manipulability(J)
+        min_m = min(min_m, m)
+        lam = c["damping_max"] * (1 - (m / c["manip_min"]) ** 2) if m < c["manip_min"] else 0.0
+        qd = J.T @ np.linalg.solve(J @ J.T + lam ** 2 * np.eye(6), np.r_[v, w])
+        peak = float(np.max(np.abs(qd)))
+        if peak > c["qd_max"]:
+            qd *= c["qd_max"] / peak
+        worst_qd = max(worst_qd, min(peak, c["qd_max"]))
+        q = q + qd * dt
+        if np.any(q < lim[0]) or np.any(q > lim[1]):
+            return None, "joint limit"
+        qs.append(q.copy())
+        err = float(np.linalg.norm(robot.fkine(q).t - T_goal.t))
+        if k >= n and err < c["rmrc_tol"] / 4:
+            break
+    if err > c["rmrc_tol"]:
+        return None, f"ended {err * 1000:.1f} mm off"
+    return np.array(qs), (f"{len(qs) - 1} steps, peak joint speed {worst_qd:.2f} rad/s, "
+                          f"min manipulability {min_m:.3f}, error {err * 1000:.2f} mm")
+
+
+def straight_path(robot, T_goal, q_start=None, steps=15, seeds=(), verbose=False):
+    qs, report = rmrc_path(robot, T_goal, q_start, steps)
+    if verbose or qs is None:
+        print(f"       RMRC: {report}")
+    return qs
 
 
 # ============================================================================
