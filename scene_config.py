@@ -25,6 +25,11 @@ PANEL_T = 0.012
 CONV_Y = -0.78
 CONV_TOP = 0.95
 
+# The glass case, as a box. Nothing outside it can be touched by an arm.
+ENCLOSURE = dict(x0=-CELL_W / 2, x1=CASE_X2,
+                 y0=FRONT_Y, y1=FRONT_Y + CELL_D,
+                 z0=BENCH_H - 0.05, z1=BENCH_H + GLASS_H)
+
 # Infeed spur: a short belt that starts inside the case, runs out through the
 # front hatch and ends against the side of the main conveyor. The UR3e sets the
 # boxed card down on its inside end; no ramp.
@@ -78,11 +83,10 @@ ARM_PORT = dict(
 INSPECT_XY = (-0.05, -0.05)
 CAM = dict(
     standoff=0.160,
-    height=0.140,
-    post=0.024,
-    head=(0.054, 0.070, 0.054),
-    lens=0.015,
-    barrel=0.022,
+    mesh="siyi_a8_mini.stl",
+    body=(0.0520, 0.0606, 0.0840),  # mesh bounding box, in the mesh's own frame
+    lens_z=0.0690,                 # base plate -> lens centre
+    lens_out=0.0260,               # base plate -> front face, along the view axis
 )
 
 
@@ -140,21 +144,12 @@ STATIC = [
          xyz=((CASE_X2 - CELL_W / 2) / 2, CELL_YC, BENCH_H + GLASS_H), color=C["frame"]),
 
 
-    dict(name="inspection_nest", group="inspect", type="cuboid",
-         size=(0.12, 0.12, 0.012), xyz=(INSPECT_XY[0], INSPECT_XY[1], BENCH_H + 0.006),
-         color=C["nest"]),
-    dict(name="camera_post", group="inspect", type="cylinder",
-         radius=CAM["post"] / 2, length=CAM["height"],
-         xyz=(INSPECT_XY[0], INSPECT_XY[1] - CAM["standoff"], BENCH_H + CAM["height"] / 2),
-         color=C["frame"]),
-    dict(name="camera_head", group="inspect", type="cuboid", size=CAM["head"],
-         xyz=(INSPECT_XY[0], INSPECT_XY[1] - CAM["standoff"],
-              BENCH_H + CAM["height"] + CAM["head"][2] / 2), color=C["camera"]),
-    dict(name="camera_lens", group="inspect", type="cylinder",
-         radius=CAM["lens"], length=CAM["barrel"], rpy=(pi / 2, 0, 0),
-         xyz=(INSPECT_XY[0],
-              INSPECT_XY[1] - CAM["standoff"] + (CAM["head"][1] + CAM["barrel"]) / 2,
-              BENCH_H + CAM["height"] + CAM["head"][2] / 2), color=C["frame"]),
+    dict(name="camera_body", group="inspect", type="mesh", filename=CAM["mesh"],
+         size=CAM["body"], rpy=(0, 0, pi / 2),
+         xyz=(INSPECT_XY[0], INSPECT_XY[1] - CAM["standoff"], BENCH_H),
+         box_xyz=(INSPECT_XY[0], INSPECT_XY[1] - CAM["standoff"],
+                  BENCH_H + CAM["body"][2] / 2),
+         color=C["camera"]),
 
 
     dict(name="hatch_head", group="hatch", type="cuboid",
@@ -231,9 +226,6 @@ STATIC = [
          radius=0.030, length=0.05, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.18), color=C["warn"]),
     dict(name="stacklight_red", group="safety", type="cylinder",
          radius=0.030, length=0.05, xyz=(0.60, 0.42, BENCH_H + GLASS_H + 0.23), color=C["stop"]),
-    dict(name="keepout_zone", group="safety", type="cuboid",
-         size=(1.00, 0.45, 0.004), xyz=(0.35, BACK_Y + 0.28, 0.022), color=C["keepout"]),
-
     dict(name="display_pose_marker", group="markers", type="cuboid",
          size=(0.08025, 0.00625, 0.13575), xyz=(0.30, -0.44, 1.32), color=C["target"]),
 ]
@@ -395,27 +387,40 @@ PACK["outer"] = (PACK["inner"][0] + 2 * PACK["wall"],
                  PACK["inner"][2] + PACK["wall"])
 
 
-def _pack_specs():
+def _bag_specs(prefix="holder"):
+    """The five parts of one bag standing at the packing station."""
     p = PACK
     ix, iy, iz = p["inner"]
     w = p["wall"]
     ox, oy, _ = p["outer"]
     hx, hy = p["holder_xy"]
-    out = [
-        dict(name="holder_base", group="pack", type="cuboid", size=(ox, oy, w),
-             xyz=(hx, hy, BENCH_H + w / 2), color=C["mailer"]),
-    ]
+    out = [dict(name=f"{prefix}_base", group="pack", type="cuboid", size=(ox, oy, w),
+                xyz=(hx, hy, BENCH_H + w / 2), color=C["mailer"])]
     for tag, side in (("py", 1), ("my", -1)):
-        out.append(dict(name=f"holder_wall_{tag}", group="pack", type="cuboid",
+        out.append(dict(name=f"{prefix}_wall_{tag}", group="pack", type="cuboid",
                         size=(ox, w, iz),
                         xyz=(hx, hy + side * (iy + w) / 2, BENCH_H + w + iz / 2),
                         color=C["mailer"]))
     for tag, side in (("px", 1), ("mx", -1)):
-        out.append(dict(name=f"holder_wall_{tag}", group="pack", type="cuboid",
+        out.append(dict(name=f"{prefix}_wall_{tag}", group="pack", type="cuboid",
                         size=(w, iy, iz),
                         xyz=(hx + side * (ix + w) / 2, hy, BENCH_H + w + iz / 2),
                         color=C["mailer"]))
+    return out
 
+
+def bag_poses():
+    """{part suffix: (x, y, z)} for a fresh bag at the packing station."""
+    return {spec["name"].split("_", 1)[1]: spec["xyz"] for spec in _bag_specs("bag")}
+
+
+def bag_names(prefix="holder"):
+    return [f"{prefix}_base"] + [f"{prefix}_wall_{t}" for t in ("py", "my", "px", "mx")]
+
+
+def _pack_specs():
+    p = PACK
+    out = _bag_specs("holder")
     out += [
         dict(name="outfeed_pad", group="pack", type="cuboid", size=p["pad"],
              xyz=(p["outfeed_xy"][0], p["outfeed_xy"][1], BENCH_H + p["pad"][2] / 2),
@@ -437,7 +442,6 @@ MOUNT = dict(
     rib=(0.100, 0.005, 0.030),
     slot_clearance=0.0015,
     at={
-        "inspection": (INSPECT_XY[0], INSPECT_XY[1], BENCH_H + 0.012),
         "return": (TRANSFER["x"], TRANSFER["y"] - 0.10, BENCH_H),
     },
     tint={"return": C["warn"]},
@@ -592,12 +596,10 @@ FRAMES = dict(
     rack_front=(RACK["centre_x"], RACK["rack_y"][0], BENCH_H + RACK["base_h"] + SLAB["h"]),
     rack_middle=(RACK["centre_x"], RACK["rack_y"][1], BENCH_H + RACK["base_h"] + SLAB["h"]),
     rack_back=(RACK["centre_x"], RACK["rack_y"][2], BENCH_H + RACK["base_h"] + SLAB["h"]),
-    inspection_nest=(INSPECT_XY[0], INSPECT_XY[1], BENCH_H + 0.02),
-    inspection_mount=mount_slab_xyz("inspection"),
     return_mount=mount_slab_xyz("return"),
     camera=(INSPECT_XY[0],
-            INSPECT_XY[1] - CAM["standoff"] + CAM["head"][1] / 2 + CAM["barrel"],
-            BENCH_H + CAM["height"] + CAM["head"][2] / 2),
+            INSPECT_XY[1] - CAM["standoff"] + CAM["lens_out"],
+            BENCH_H + CAM["lens_z"]),
     holder=holder_slab_xyz(),
     outfeed=(PACK["outfeed_xy"][0], PACK["outfeed_xy"][1], BENCH_H + PACK["pad"][2]),
     transfer_nest=(TRANSFER["x"], TRANSFER["y"], BENCH_H + RACK["base_h"] + SLAB["h"]),

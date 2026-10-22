@@ -27,7 +27,7 @@ TASK = dict(
     link_radii=(0.055, 0.050, 0.045, 0.036, 0.028, 0.022),
     grip_depth=0.015,
     lift=0.110,
-    scan_height=0.080,
+    scan_height=0.012,     # slab underside is held this far above the bench
     steps=35,
     check_every=2,
     margin=0.005,
@@ -36,6 +36,7 @@ TASK = dict(
     point_spacing=0.012,
     dt=0.03,
     pause=0.4,
+    collect_pause=3.0,     # the bag sits at the collection point this long (s)
 )
 
 TOOL_DOWN = SE3.Rx(pi)
@@ -52,30 +53,59 @@ class Restart(Exception):
     """RESTART SCENE pressed while the robots are moving."""
 
 
+class Override(Exception):
+    """COBOTTA MANUAL OVERRIDE pressed while the robots are moving."""
+
+
 class StopGate:
     """Every motion step goes through here, so the panel buttons work mid-cycle."""
 
     def __init__(self, env, ui):
         self.env, self.ui = env, ui
         self.view = None
+        self.watch_override = True
+        self.say = print
 
     def step(self, dt=0.0):
         if self.view is not None:
             self.view.update()
         self.env.step(dt)
         if self.ui.get("estop"):
-            raise Halt
+            self.hold()
+        if self.watch_override and self.ui.get("override"):
+            raise Override
         if self.ui.get("request") == "restart":
             raise Restart
         if self.ui.get("request") == "start":      # already running - ignore it
             self.ui["request"] = None
+
+    def hold(self):
+        """E-STOP latched. Freeze the arm exactly where it is and keep the panel
+        alive, so the cycle can pick up from this step instead of being thrown
+        away. Returns once the stop is released and RESUME is pressed; RESTART
+        SCENE and MANUAL OVERRIDE still get out of here."""
+        self.say("E-STOP - motion held. Press E-STOP RELEASE, then RESUME")
+        while True:
+            self.env.step(0.05)
+            if self.view is not None:
+                self.view.update()
+            if self.watch_override and self.ui.get("override"):
+                raise Override
+            if self.ui.get("request") == "restart":
+                self.ui["request"] = None
+                raise Restart
+            if self.ui.get("estop"):
+                continue
+            if self.ui.get("request") == "resume":
+                self.ui["request"] = None
+                self.say("Resuming from where it stopped")
+                return
 
 
 def checker_cfg():
     g = cell.CONFIG["gripper"]
     return dict(
         robot=dict(link_radii=TASK["link_radii"], tool_length=TASK["tool_length"],
-                   link_boxes=cell.CONFIG["robot"]["link_boxes"],
                    home_deg=TASK["home_deg"]),
         motion=dict(steps=TASK["steps"], check_every=TASK["check_every"],
                     margin=TASK["margin"], jaw_margin=TASK["jaw_margin"],
@@ -83,6 +113,8 @@ def checker_cfg():
                     point_spacing=TASK["point_spacing"]),
         gripper=dict(open=g["open"], closed=g["closed"], finger=g["finger"],
                      pad=g["pad"], pad_xyz=g["pad_xyz"], clearance=g["clearance"]),
+        rmrc=dict(cell.CONFIG["rmrc"]),
+        self_check=dict(cell.CONFIG["self_check"]),
     )
 
 
@@ -90,7 +122,8 @@ def checker_cfg():
 # COLLISION VIEW
 # ----------------------------------------------------------------------------
 VIEW = dict(box=(0.20, 0.85, 0.95, 0.22), ellipsoid=(1.00, 0.45, 0.10, 0.30),
-             pad=0.120, samples=300, parked=SE3(0, 0, -100).A)
+            pad=0.120, samples=300, case_slack=0.0, case_tol=0.002,
+            parked=SE3(0, 0, -100).A)
 
 
 class CollisionView:
@@ -108,6 +141,23 @@ class CollisionView:
             out.append((self.task.outfeed.robot, lambda r: ucd.arm_ellipsoids(r, r.q)))
         return out
 
+    def case(self, slack=0.0):
+        e = cfg.ENCLOSURE
+        lo = np.array([e["x0"], e["y0"], e["z0"]], dtype=float) - slack
+        hi = np.array([e["x1"], e["y1"], e["z1"]], dtype=float) + slack
+        return lo, hi
+
+    def inside_case(self, pts, slack):
+        lo, hi = self.case(slack)
+        return pts[np.all((pts >= lo) & (pts <= hi), axis=1)]
+
+    def touches_case(self, ob):
+        """An arm cannot leave the glass, so anything wholly outside it is unreachable
+        whatever the joint limits allow - the arm would hit the case first."""
+        lo, hi = self.case(-VIEW["case_tol"])
+        reach = np.abs(ob.half) @ np.abs(ob.pose.R).T      # the box's own axis extents
+        return bool(np.all(ob.pose.t + reach >= lo) and np.all(ob.pose.t - reach <= hi))
+
     def envelope(self):
         rng = np.random.default_rng(0)
         out = []
@@ -116,7 +166,7 @@ class CollisionView:
             for _ in range(VIEW["samples"]):
                 q = np.array([rng.uniform(*l.qlim) for l in robot.links])
                 pts += [T.t for T in robot.fkine_all(q)]
-            out.append(np.asarray(pts, dtype=float))
+            out.append(self.inside_case(np.asarray(pts, dtype=float), VIEW["case_slack"]))
         return out
 
     def in_reach(self, ob, envelope):
@@ -130,7 +180,7 @@ class CollisionView:
     def build(self):
         envelope = self.envelope()
         for ob in self.task.world.obstacles:
-            if not self.in_reach(ob, envelope):
+            if not self.touches_case(ob) or not self.in_reach(ob, envelope):
                 continue
             shape = geometry.Cuboid(scale=list(np.asarray(ob.half) * 2), pose=ob.pose,
                                     color=VIEW["box"])
@@ -184,6 +234,123 @@ class CollisionView:
 
 
 # ----------------------------------------------------------------------------
+# MANUAL OVERRIDE
+# ----------------------------------------------------------------------------
+OVERRIDE = dict(rate=0.80, tick=0.05)
+
+
+class ManualOverride:
+    """Joint jogging for the COBOTTA from the Swift panel.
+
+    Turning it on hands any card back first, then unlocks one slider per joint.
+    Each tick ramps the arm towards the slider angles and refuses a step that
+    would put a link into something."""
+
+    def __init__(self, task):
+        self.task = task
+        self.on = False
+        self.blocked = False
+        self.sliders = []
+        self.names = []
+        self.readout = None
+        self.target = np.asarray(task.robot.q, dtype=float).copy()
+
+    def build(self):
+        env, rb = self.task.env, self.task.robot
+        self.readout = swift.Label(desc="Manual override off")
+        env.add(self.readout)
+        for i, link in enumerate(rb.links):
+            lo, hi = np.rad2deg(np.asarray(link.qlim, dtype=float))
+            name = f"cobotta_j{i + 1}"
+            slider = swift.Slider(self.jog(i), min=float(np.floor(lo)),
+                                  max=float(np.ceil(hi)), step=1.0,
+                                  value=float(np.rad2deg(self.target[i])),
+                                  desc=f"COBOTTA J{i + 1}", unit="&#176;", precision=0)
+            env.add(slider, name=name)
+            self.sliders.append(slider)
+            self.names.append(name)
+
+    def jog(self, i):
+        def cb(value):
+            self.target[i] = float(np.deg2rad(float(value)))
+            self.blocked = False
+        return cb
+
+    def read_sliders(self):
+        """The panel reports a slider two ways - its own callback, and the env.values
+        dict. Read both, so a jog lands whichever one the browser sends."""
+        values = getattr(self.task.env, "values", None)
+        if not values:
+            return
+        for i, name in enumerate(self.names):
+            v = values.get(name)
+            if v is None:
+                continue
+            angle = float(np.deg2rad(float(v)))
+            if abs(angle - self.target[i]) > 1e-6:
+                self.target[i] = angle
+                self.blocked = False
+
+    def sync(self):
+        self.target = np.asarray(self.task.robot.q, dtype=float).copy()
+        values = getattr(self.task.env, "values", None)
+        for slider, name, angle in zip(self.sliders, self.names, np.rad2deg(self.target)):
+            slider.value = float(angle)
+            if values is not None:
+                values[name] = float(angle)
+
+    def enable(self):
+        self.on = True
+        self.blocked = False
+        self.sync()
+        self.report("drag a joint slider")
+
+    def disable(self):
+        self.on = False
+        self.blocked = False
+        self.sync()
+        self.report("")
+
+    def report(self, note):
+        if self.readout is None:
+            return
+        rb = self.task.robot
+        T = rb.fkine(rb.q)
+        deg = ", ".join(f"{a:.0f}" for a in np.rad2deg(rb.q))
+        head = "MANUAL OVERRIDE" if self.on else "Manual override off"
+        tail = f" - {note}" if note else ""
+        self.readout.desc = (f"{head}  J[{deg}] deg   flange "
+                             f"[{T.t[0]:+.3f} {T.t[1]:+.3f} {T.t[2]:+.3f}] m{tail}")
+
+    def update(self):
+        if not self.on:
+            return
+        task, rb = self.task, self.task.robot
+        self.read_sliders()
+        q = np.asarray(rb.q, dtype=float)
+        span = OVERRIDE["rate"] * OVERRIDE["tick"]
+        step = np.clip(self.target - q, -span, span)
+        if float(np.max(np.abs(step))) < 1e-5:
+            return
+        goal = q + step
+        allowed = cell.contacts(rb, task.cfg, task.world, q)
+        hit = cell.first_collision(rb, task.cfg, task.world, goal, allowed)
+        if hit is not None:
+            if not self.blocked:
+                self.blocked = True
+                self.sync()
+                task.say("collision detected stopping now")
+                self.report(hit)
+            return
+        self.blocked = False
+        rb.q = goal
+        task.ctrl.refresh()
+        if task.view is not None:
+            task.view.update()
+        self.report("jogging")
+
+
+# ----------------------------------------------------------------------------
 # THE ARM'S HAND
 # ----------------------------------------------------------------------------
 class Hand:
@@ -216,6 +383,10 @@ def spec_box(spec):
     if spec["type"] == "sphere":
         r = spec["radius"]
         return (2 * r, 2 * r, 2 * r), pose
+    if spec["type"] == "mesh" and spec.get("size") is not None:
+        centre = spec.get("box_xyz", spec["xyz"])
+        return (tuple(spec["size"]),
+                SE3(*centre) * SE3.RPY(list(spec.get("rpy", (0, 0, 0)))))
     return None, None
 
 
@@ -267,9 +438,9 @@ class   PackagingTask:
         self.headless = headless
         self.face = None
         self.ui = dict(face="front", go=False, reject=False, estop=False,
-                       request=None, card=None)
+                       override=False, request=None, card=None)
         self.status = None
-        self.env.launch(realtime=not headless, headless=headless)
+        self.env.launch(realtime=not headless, headless=headless, axes=False)
         self.shapes, robots = cvs.build_scene(self.env)
         self.robot = robots[ARM]
         if self.robot is None:
@@ -281,10 +452,12 @@ class   PackagingTask:
         self.world = build_world(float(self.robot.base.t[2]), TASK["point_spacing"])
         self.hand = Hand(self.robot)
         self.gate = StopGate(self.env, self.ui)
+        self.gate.say = self.say
         self.ctrl = cell.Controller(self.robot, self.hand, self.gate, self.world, self.cfg)
         self.start_poses = {n: SE3(sh.T) for n, sh in self.shapes.items()}
         self.ctrl.refresh()
         self.slab_card = None
+        self.delivered_card = None
         self.packed = False
         kawasaki = robots.get(vault.ARM)
         self.vault = (vault.VaultArm(self.env, kawasaki, self.shapes, self.gate,
@@ -297,6 +470,7 @@ class   PackagingTask:
                         if ur3e is not None else None)
         self.view = CollisionView(self.env, self)
         self.gate.view = self.view
+        self.pendant = ManualOverride(self)
         if not headless:
             self.add_panel()
         self.env.step(0.0)
@@ -353,15 +527,13 @@ class   PackagingTask:
     def spots(self):
         p, m = cfg.PACK, cfg.MOUNT
         slab_h = cfg.SLAB["h"]
-        mount_z = m["at"]["inspection"][2] + m["shelf"][2]
         return dict(
             handoff=dict(xy=(cfg.TRANSFER["x"], cfg.TRANSFER["y"]),
                          top=cfg.BENCH_H + cfg.RACK["base_h"] + slab_h,
                          lift=0.070),
-            scan=dict(xy=m["at"]["inspection"][:2],
-                      top=mount_z + TASK["scan_height"] + slab_h,
+            scan=dict(xy=cfg.INSPECT_XY,
+                      top=cfg.BENCH_H + TASK["scan_height"] + slab_h,
                       held=True),
-            mount=dict(xy=m["at"]["inspection"][:2], top=mount_z + slab_h),
             giveback=dict(xy=m["at"]["return"][:2],
                           top=m["at"]["return"][2] + m["shelf"][2] + slab_h),
             holder_drop=dict(xy=p["holder_xy"],
@@ -401,30 +573,49 @@ class   PackagingTask:
         return out
 
     def jaw_links(self):
-        return (len(self.cfg["robot"]["link_boxes"]),)
-
-    def move_linear(self, T_goal, steps=12):
-        ctrl = self.ctrl
+        return (self.robot.n + 1,)        # the jaw pads' index in arm_ellipsoids
+ 
+    def ik_line(self, T_goal, steps=12):
         T0 = self.robot.fkine(self.robot.q)
         qs, q = [], self.robot.q.copy()
         for a in np.linspace(0.0, 1.0, steps)[1:]:
             T = SE3.Rt(T_goal.R, T0.t + a * (T_goal.t - T0.t))
             sol = self.robot.ikine_LM(T, q0=q, joint_limits=True, slimit=40, ilimit=200)
             if not sol.success:
-                return ctrl.move_to_pose(T_goal)
+                return None
             q = sol.q
             qs.append(q)
-        start = cell.contacts(self.robot, self.cfg, self.world, self.robot.q)
-        k, hit = cell.path_collision(self.robot, self.cfg, self.world, np.array(qs), start)
-        if hit is not None:
-            print(f"    straight move blocked at step {k} ({hit}) - planning around")
-            return ctrl.move_to_pose(T_goal)
-        for step_q in qs:
-            self.robot.q = step_q
-            ctrl.refresh()
-            self.gate.step(TASK["dt"])
-        return True
+        return np.array(qs)
 
+    def run_path(self, qs):
+        start = cell.contacts(self.robot, self.cfg, self.world, self.robot.q)
+        k, hit = cell.path_collision(self.robot, self.cfg, self.world, qs, start)
+        if hit is not None:
+            return k, hit
+        for q in qs:
+            self.robot.q = q
+            self.ctrl.refresh()
+            self.gate.step(TASK["dt"])
+        return None, None
+
+    def move_linear(self, T_goal, label="", steps=12):
+        qs, report = self.ctrl.rmrc(T_goal)
+        if qs is None:
+            print(f"    RMRC{label} not usable ({report}) - IK along the line")
+        else:
+            k, hit = self.run_path(qs)
+            if hit is None:
+                print(f"    RMRC{label}: {report}")
+                return True
+            print(f"    RMRC{label} blocked at step {k} ({hit}) - IK along the line")
+        qs = self.ik_line(T_goal, steps)
+        if qs is not None:
+            k, hit = self.run_path(qs)
+            if hit is None:
+                return True
+            print(f"    straight move blocked at step {k} ({hit}) - planning around")
+        return self.ctrl.move_to_pose(T_goal)
+ 
     def pick(self, name, spot, grip=None, width=None):
         ctrl, s = self.ctrl, spot
         grip = grip or name
@@ -435,11 +626,11 @@ class   PackagingTask:
         own = list(dict.fromkeys([name, grip] + rides))
         nearby = [n for n in self.near(s["xy"], s["top"]) if n not in own]
         with ctrl.ignoring(own), ctrl.ignoring(nearby, links=self.jaw_links()):
-            ok &= self.move_linear(g)
+            ok &= self.move_linear(g, f" down to {name}")
             ctrl.grasp(self.shapes[name], self.world.get(name), w)
             for r in rides:
                 ctrl.grasp(self.shapes[r], self.world.get(r))
-            ok &= self.move_linear(a)
+            ok &= self.move_linear(a, f" lift {name}")
         return ok
 
     def place(self, spot, resting):
@@ -449,9 +640,9 @@ class   PackagingTask:
         ok = ctrl.move_to_pose(a)
         nearby = [n for n in self.near(s["xy"], s["top"]) if n not in names]
         with ctrl.ignoring(names), ctrl.ignoring(nearby, links=self.jaw_links()):
-            ok &= self.move_linear(g)
+            ok &= self.move_linear(g, " down to place")
             ctrl.release(resting)
-            ok &= self.move_linear(a)
+            ok &= self.move_linear(a, " clear")
         return ok
 
     def report_scan(self, face):
@@ -481,7 +672,7 @@ class   PackagingTask:
         def reset(_):
             if self.ui["estop"]:
                 self.ui["estop"] = False
-                self.say("e-stop released - Choose a slot and press START")
+                self.say("E-stop released - press RESUME to carry on")
             else:
                 self.say("Nothing to reset")
 
@@ -493,6 +684,15 @@ class   PackagingTask:
         def view_toggle(_):
             self.say("collision boxes on" if self.view.toggle() else "collision boxes off")
 
+        def override(_):
+            if self.ui.get("override"):
+                self.ui["override"] = False
+                self.gate.watch_override = True
+                self.pendant.disable()
+                self.say("Manual override off - press RESTART SCENE before a new cycle")
+            else:
+                self.ui["override"] = True
+ 
         self.status = swift.Label(desc="Starting up")
         self.env.add(self.status)
         if self.vault is not None:
@@ -511,9 +711,12 @@ class   PackagingTask:
         self.env.add(swift.Button(finish(True), desc="REJECT"))
         self.env.add(swift.Button(estop, desc="EMERGENCY STOP"))
         self.env.add(swift.Button(reset, desc="E-STOP RELEASE"))
+        self.env.add(swift.Button(request("resume"), desc="RESUME"))
         self.env.add(swift.Button(request("restart"), desc="RESTART SCENE"))
         self.env.add(swift.Button(view_toggle, desc="COLLISION BOXES"))
-
+        self.env.add(swift.Button(override, desc="COBOTTA MANUAL OVERRIDE"))
+        self.pendant.build()
+ 
     def say(self, text):
         print(f"   {text}")
         if getattr(self, "status", None) is not None:
@@ -590,12 +793,54 @@ class   PackagingTask:
 
         print("5. back to the waiting pose, clear of the UR3e")
         self.park()
-        self.take_back()                     # the card stays in the box; its slot stays empty
+        self.delivered_card = self.take_back()   # the card leaves in the bag
         self.packed = True
 
         if self.outfeed is not None:         # steps 6-8: UR3e puts the box on the conveyor
             self.outfeed.deliver()
+        self.say("bag at the collection point - waiting for the customer")
+        self.linger()
+        self.respawn_bag()
         print(f"done - {ctrl.replans} re-plan(s), {ctrl.faults} fault(s)")
+
+    def park_shape(self, name):
+        """Take an object out of play: out of sight and out of the collision world."""
+        shape, T = self.shapes.get(name), SE3(0, 0, -5)
+        if shape is None:
+            return
+        shape.T = T.A
+        try:
+            ob = self.world.get(name)
+        except StopIteration:
+            return
+        ob.pose = T
+        ob.active = False
+
+    def linger(self, seconds=None):
+        """Hold the scene for a moment with the bag sitting at the collection point.
+        It runs through the gate, so the e-stop, RESUME and the override all still
+        work while the customer is "collecting"."""
+        seconds = TASK["collect_pause"] if seconds is None else seconds
+        dt = TASK["dt"]
+        for _ in range(max(1, int(round(seconds / dt)))):
+            self.gate.step(dt)
+
+    def respawn_bag(self):
+        """The customer takes the delivered bag and its card, and a fresh bag is set
+        down at the packing station, so START can be pressed again straight away."""
+        if self.delivered_card is not None:
+            self.park_shape(self.delivered_card)
+            print(f"   customer collects the bag with {self.delivered_card}")
+            self.delivered_card = None
+        for suffix, xyz in cfg.bag_poses().items():
+            name = f"holder_{suffix}"
+            T = SE3(*xyz)
+            self.shapes[name].T = T.A
+            ob = self.world.get(name)
+            ob.pose, ob.active = T, True
+        self.packed = False
+        self.say("fresh bag at the packing station - ready to run again")
+        return True
 
     def park(self):
         ok = self.ctrl.move_to(np.deg2rad(TASK["park_deg"]))
@@ -604,6 +849,7 @@ class   PackagingTask:
 
     def reset_scene(self):
         self.take_back()
+        self.delivered_card = None
         self.packed = False
         self.ctrl.carried.clear()
         for name, pose in self.start_poses.items():
@@ -631,6 +877,9 @@ class   PackagingTask:
         self.say("Ready - choose a card and press START")
         while True:
             self.env.step(0.05)
+            if self.ui.get("override") and not self.pendant.on:
+                self.enter_override()
+            self.pendant.update()
             req = self.ui.get("request")
             if req is None:
                 continue
@@ -638,20 +887,61 @@ class   PackagingTask:
             if self.ui["estop"]:
                 self.say("E-STOP latched - press E-STOP RELEASE")
                 continue
+            if req == "resume":
+                self.say("Nothing is running - choose a card and press START")
+                continue
+            if self.ui.get("override") and req == "start":
+                self.say("MANUAL OVERRIDE is on - turn it off before starting a cycle")
+                continue
             if req == "start":
                 self.ui.update(go=False, reject=False, face="front")
                 try:
                     self.run()
                 except Halt:
-                    self.say("E-STOP - motion stopped. Press E-STOP RELEASE, then RESTART SCENE")
+                    self.say("E-STOP - motion stopped. Press E-STOP RELEASE, then RESUME")
+                except Override:
+                    self.enter_override()
                 except Restart:
                     self.restart()
             elif req == "restart":
                 self.restart()
 
+    def hand_back(self):
+        """Put whatever is in the gripper back on the Return mount, so manual
+        jogging never starts with a card hanging off the arm."""
+        if not self.ctrl.carried:
+            return True
+        held = [ob.name for _, ob, _ in self.ctrl.carried]
+        print(f"   manual override: returning {held[0]} to the Return mount")
+        ok = self.place(self.spots()["giveback"], SE3(*cfg.mount_slab_xyz("return")))
+        if ok:
+            self.take_back()
+        return ok
+
+    def enter_override(self):
+        """Switch the COBOTTA to manual: hand the card back, then unlock the jog
+        sliders. Any contact on the way out stops the arm where it stands."""
+        self.gate.watch_override = False
+        self.say("MANUAL OVERRIDE - returning the card")
+        try:
+            ok = self.hand_back()
+        except (Halt, Restart):
+            ok = False
+        except Exception:
+            ok = False
+        if not ok and self.ctrl.carried:
+            self.say("collision detected stopping now")
+            self.ctrl.carried.clear()
+        self.pendant.enable()
+        self.say("MANUAL OVERRIDE on - jog the COBOTTA with the joint sliders")
+
     def restart(self):
         self.ui["request"] = None
         self.reset_scene()
+        self.ui["override"] = False
+        self.gate.watch_override = True
+        if self.pendant is not None:
+            self.pendant.disable()
         self.say("Scene restarted - choose a card and press START")
 
     def park_clearance(self, width=0.10, heights=(0.04, 0.12, 0.22, 0.32), n=40):

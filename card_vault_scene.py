@@ -144,7 +144,7 @@ def main():
         skip_groups.add("enclosure")
 
     env = swift.Swift()
-    env.launch(realtime=True, browser=args.browser)
+    env.launch(realtime=True, browser=args.browser, axes=False)
 
     objects, robots = build_scene(
         env,

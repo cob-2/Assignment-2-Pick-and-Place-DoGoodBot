@@ -29,15 +29,6 @@ CONFIG = dict(
         home_deg=(0, 10, 100, 0, 70, 0),
         pedestal=dict(radius=0.070, height=0.060),
         link_radii=(0.055, 0.050, 0.045, 0.036, 0.028, 0.022),
-        link_boxes=(
-            ((-0.0181, +0.0000, +0.0540), (0.0839, 0.0678, 0.0540)),
-            ((+0.0000, +0.0165, +0.0042), (0.0492, 0.0545, 0.0533)),
-            ((+0.0843, +0.0120, +0.0903), (0.1172, 0.0483, 0.0318)),
-            ((-0.0072, -0.0022, +0.0274), (0.0380, 0.0353, 0.0606)),
-            ((-0.0000, -0.0307, -0.0002), (0.0307, 0.0578, 0.0308)),
-            ((+0.0000, +0.0016, +0.0055), (0.0293, 0.0309, 0.0330)),
-            ((+0.0000, -0.0000, +0.0159), (0.0276, 0.0306, 0.0194)),
-        ),
         tool_length=0.060,
         tool_radius=0.016,
     ),
@@ -83,6 +74,21 @@ CONFIG = dict(
     camera=dict(height=0.32, mast=0.030, body=0.060, offset=0.075,
                 colour=(0.10, 0.10, 0.12, 1.0)),
 
+    rmrc=dict(
+        speed=0.09,            # TCP speed along the straight line (m/s)
+        w_max=1.2,             # TCP turn rate cap (rad/s)
+        min_time=0.30,         # shortest leg, so tiny moves still ramp (s)
+        qd_max=1.50,           # joint speed cap (rad/s)
+        manip_min=0.012,       # below this manipulability, damping switches on
+        damping_max=0.06,      # largest damping factor (lambda) at a singularity
+        tol=0.002,             # final TCP position error accepted (m)
+        settle=15,             # extra steps allowed to close the last error
+    ),
+
+    self_check=dict(shrink=0.85,   # link capsules are this fraction of the ellipsoid
+                    apart=4,       # links this far apart in the chain are tested
+                    samples=150),  # random poses used to learn the structural pairs
+
     motion=dict(steps=35,
                 check_every=2,
                 margin=0.005,
@@ -96,8 +102,8 @@ CONFIG = dict(
 
     gripper=dict(open=0.015, closed=0.004,
                  finger=(0.014, 0.006, 0.060),
-        pad=(0.0311, 0.0139, 0.0239),
-        pad_xyz=(0.0000, 0.0069, 0.0481),
+                 pad=(0.0262, 0.0117, 0.0201),   # semi-axes containing the finger mesh
+                 pad_xyz=(0.0000, 0.0069, 0.0481),
                  clearance=0.001),
 
     intruder=dict(size=(0.07, 0.07, 0.16), xyz=(-0.10, -0.20, BENCH_H + 0.08),
@@ -111,6 +117,32 @@ MESH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # ============================================================================
 # COBOTTA MODEL
 # ============================================================================
+def E(centre, R, radii):
+    R = np.array(R, dtype=float)
+    U, _, Vt = np.linalg.svd(R)          # re-orthonormalise after rounding
+    return np.array(centre, dtype=float), U @ Vt, np.array(radii, dtype=float)
+
+
+# One or more oriented ellipsoids per link, each the smallest PCA-aligned ellipsoid
+# that contains every vertex of that link's mesh, measured in the link's own DH
+# frame. Long or bent links are split into 2-3 pieces so the fit stays tight. Same
+# idea and format as kawasaki_collision_detection.LINK_ELLIPSOIDS.
+LINK_ELLIPSOIDS = {
+    0: [E((-0.0243, +0.0502, +0.0507), ((-0.9923, +0.1131, +0.0499), (+0.0261, -0.2025, +0.9789), (+0.1208, +0.9727, +0.1980)), (0.1228, 0.0957, 0.0195)),
+       E((-0.0098, -0.0030, +0.0694), ((-0.9692, +0.0352, -0.2438), (+0.0288, +0.9991, +0.0295), (+0.2446, +0.0216, -0.9694)), (0.1448, 0.0689, 0.0831)),
+       E((-0.0279, -0.0532, +0.0501), ((-0.9922, +0.1207, -0.0322), (-0.0068, +0.2050, +0.9787), (+0.1247, +0.9713, -0.2026)), (0.1135, 0.0907, 0.0148))],   # base_link, 3 piece(s)
+    1: [E((-0.0000, +0.0231, +0.0076), ((-0.0000, +1.0000, +0.0000), (-0.8631, -0.0000, -0.5051), (-0.5051, -0.0000, +0.8631)), (0.0774, 0.0610, 0.0908))],   # J1, 1 piece(s)
+    2: [E((+0.0098, +0.0089, +0.0832), ((-0.3022, +0.6826, +0.6653), (-0.8850, -0.4602, +0.0701), (+0.3540, -0.5677, +0.7433)), (0.0552, 0.0463, 0.0571)),
+       E((+0.0837, +0.0217, +0.0952), ((+0.9908, -0.1267, -0.0480), (-0.1100, -0.9590, +0.2611), (-0.0791, -0.2534, -0.9641)), (0.0658, 0.0534, 0.0394)),
+       E((+0.1565, +0.0061, +0.0834), ((+0.3101, -0.7460, +0.5894), (-0.7935, -0.5446, -0.2718), (+0.5237, -0.3834, -0.7608)), (0.0512, 0.0459, 0.0562))],   # J2, 3 piece(s)
+    3: [E((-0.0054, -0.0054, +0.0299), ((+0.1875, -0.9620, -0.1983), (-0.0091, +0.2002, -0.9797), (+0.9822, +0.1855, +0.0288)), (0.0867, 0.0501, 0.0520))],   # J3, 1 piece(s)
+    4: [E((-0.0001, -0.0313, -0.0030), ((-0.0016, -1.0000, -0.0073), (+0.9951, -0.0023, +0.0984), (-0.0984, -0.0071, +0.9951)), (0.0835, 0.0425, 0.0460))],   # J4, 1 piece(s)
+    5: [E((+0.0011, -0.0004, -0.0086), ((-0.0641, -0.9943, -0.0855), (+0.9175, -0.0924, +0.3869), (-0.3926, -0.0536, +0.9182)), (0.0545, 0.0424, 0.0281)),
+       E((-0.0005, +0.0060, +0.0262), ((-0.9976, -0.0581, +0.0388), (-0.0686, +0.9218, -0.3815), (-0.0136, -0.3833, -0.9235)), (0.0473, 0.0580, 0.0318))],   # J5, 2 piece(s)
+    6: [E((-0.0004, +0.0002, +0.0159), ((-0.0194, -0.9988, +0.0455), (-0.9993, +0.0209, +0.0324), (-0.0333, -0.0448, -0.9984)), (0.0422, 0.0381, 0.0286))],   # J6, 1 piece(s)
+    }
+
+
 DH_TABLE = [
     (0.1800,  0.0000, -pi / 2, 0.0,    (-150.0, 150.0)),
     (0.0000, -0.1650,  0.0,    pi / 2, (-60.0,  100.0)),
@@ -233,27 +265,97 @@ def _frame_along(a, b):
 
 def arm_ellipsoids(robot, cfg, q):
     frames = robot.fkine_all(q)
-    boxes = cfg["robot"]["link_boxes"]
     margin = cfg["motion"]["margin"]
     out = []
-    for i, (centre, half) in enumerate(boxes[:len(frames)]):
-        T = frames[i]
-        out.append((i, (T * SE3(*centre)).t, T.R, np.asarray(half) + margin))
+    for i, T in enumerate(frames):
+        for centre, R, radii in LINK_ELLIPSOIDS.get(i, []):
+            out.append((i, T.R @ centre + T.t, T.R @ R, radii + margin))
     flange = robot.fkine(q)
     g = cfg["gripper"]
     px, py, pz = g["pad_xyz"]
-    pad = np.asarray(g["pad"]) / 2 + cfg["motion"]["jaw_margin"]
+    pad = np.asarray(g["pad"]) + cfg["motion"]["jaw_margin"]
     travel = getattr(robot, "gripper_opening", g["open"])
-    idx = len(boxes)
+    idx = len(frames)
     for side in (1, -1):
         c = flange * SE3(px, side * (travel + py), pz)
         out.append((idx, c.t, flange.R, pad))
     return out
 
 
-def contacts(robot, cfg, world, q):
+def _unit_sphere(n=48):
+    """n roughly even points on the unit sphere (Fibonacci spiral)."""
+    k = np.arange(n) + 0.5
+    phi = np.arccos(1 - 2 * k / n)
+    theta = np.pi * (1 + 5 ** 0.5) * k
+    return np.column_stack((np.cos(theta) * np.sin(phi),
+                            np.sin(theta) * np.sin(phi), np.cos(phi)))
+
+
+_SPHERE = _unit_sphere()
+
+
+def ellipsoid_overlap(a, b, shrink=1.0):
+    """Do two oriented ellipsoids (centre, R, radii) overlap? Points sampled on each
+    surface are tested against the other's inequality, which catches every case
+    except two that interpenetrate without either surface sample landing inside -
+    impossible here, where the radii are all of a similar order."""
+    for (c1, R1, r1), (c2, R2, r2) in ((a, b), (b, a)):
+        pts = c1 + (_SPHERE * (np.asarray(r1) * shrink)) @ np.asarray(R1).T
+        if np.any(np.sum((((pts - c2) @ np.asarray(R2)) / (np.asarray(r2) * shrink)) ** 2,
+                         axis=1) < 1.0):
+            return True
+    return False
+
+
+def self_contacts(items, shrink=1.0, apart=2):
+    """The arm against itself. `items` are (idx, [label,] centre, R, radii) tuples as
+    any of the three arm_ellipsoids functions returns them. Every pair at least
+    `apart` links apart in the chain is tested - neighbours are skipped because they
+    always meet at a joint. Pairs that overlap in every pose are structural rather
+    than a fault and are removed by structural_self_pairs below.
+
+    Returns a set of 'partA~partB' strings."""
+    parts = []
+    for it in items:
+        label = it[1] if isinstance(it[1], str) else f"link{it[0]}"
+        parts.append((it[0], label, it[-3], it[-2], np.asarray(it[-1], dtype=float)))
     found = set()
-    for idx, centre, R, radii in arm_ellipsoids(robot, cfg, q):
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts)):
+            if abs(parts[i][0] - parts[j][0]) < apart:
+                continue
+            if ellipsoid_overlap(parts[i][2:], parts[j][2:], shrink):
+                found.add(f"{parts[i][1]}~{parts[j][1]}")
+    return found
+
+
+def structural_self_pairs(robot, ellipsoids, shrink=0.85, apart=2, samples=150):
+    """Which capsule pairs overlap in *every* pose. Those are an artefact of the
+    ellipsoid fit - a wrist ellipsoid that always pokes into the gripper base, say -
+    not a fault, so they are subtracted from every self-collision result. Learned
+    once per robot from random configurations and cached on it, rather than
+    hard-coded, so it stays right if anyone re-fits the ellipsoids."""
+    cached = getattr(robot, "_structural_self_pairs", None)
+    if cached is not None:
+        return cached
+    rng = np.random.default_rng(0)
+    tally = {}
+    for _ in range(samples):
+        q = np.array([rng.uniform(*l.qlim) for l in robot.links])
+        for pair in self_contacts(ellipsoids(q), shrink, apart):
+            tally[pair] = tally.get(pair, 0) + 1
+    cached = {p for p, n in tally.items() if n >= 0.95 * samples}
+    object.__setattr__(robot, "_structural_self_pairs", cached)
+    return cached
+
+
+def contacts(robot, cfg, world, q):
+    items = arm_ellipsoids(robot, cfg, q)
+    sc = cfg.get("self_check", CONFIG["self_check"])
+    ignore = structural_self_pairs(robot, lambda qq: arm_ellipsoids(robot, cfg, qq),
+                                   sc["shrink"], sc["apart"], sc["samples"])
+    found = self_contacts(items, sc["shrink"], sc["apart"]) - ignore
+    for idx, centre, R, radii in items:
         for ob in world.obstacles:
             if not ob.active or idx in ob.ignore_links:
                 continue
@@ -338,6 +440,58 @@ class Controller:
         self.faults += 1
         print("    no safe path - holding")
         return None
+
+    def rmrc(self, T_goal, speed=None):
+        """Resolved-rate motion control of the flange along a straight line to T_goal.
+
+        The TCP follows the line with a quintic profile, so it starts and stops
+        smoothly. Each step takes the gap between where the flange is and where it
+        should be next step as a spatial velocity xd = [v; w], solves
+        qd = J^T (J J^T + lambda^2 I)^-1 xd with lambda > 0 only near a singularity
+        (manipulability below manip_min), caps qd and integrates q += qd dt.
+        Returns (qs, report), or (None, why) if it could not hold the line."""
+        r = self.cfg["rmrc"]
+        dt = self.cfg["motion"]["dt"]
+        speed = r["speed"] if speed is None else speed
+        q = np.asarray(self.robot.q, dtype=float).copy()
+        T0 = self.robot.fkine(q)
+        dist = float(np.linalg.norm(T_goal.t - T0.t))
+        ang = float(abs((T0.inv() * T_goal).angvec()[0]))
+        n = max(1, int(np.ceil(max(dist / speed, ang / r["w_max"], r["min_time"]) / dt)))
+        lim = np.asarray(self.robot.qlim)
+        qs, worst, min_m, err = [], 0.0, np.inf, np.inf
+        for k in range(1, n + r["settle"]):
+            tau = min(k / n, 1.0)
+            sc = 10 * tau ** 3 - 15 * tau ** 4 + 6 * tau ** 5
+            p_des = T0.t + sc * (T_goal.t - T0.t)
+            R_des = T0.interp(T_goal, sc).R
+            T_now = self.robot.fkine(q)
+            v = (p_des - T_now.t) / dt
+            Re = R_des @ T_now.R.T
+            w = 0.5 * np.array([Re[2, 1] - Re[1, 2],
+                                Re[0, 2] - Re[2, 0],
+                                Re[1, 0] - Re[0, 1]]) / dt
+            J = np.asarray(self.robot.jacob0(q))
+            m = float(np.sqrt(max(np.linalg.det(J @ J.T), 0.0)))
+            min_m = min(min_m, m)
+            lam = (r["damping_max"] * (1 - (m / r["manip_min"]) ** 2)
+                   if m < r["manip_min"] else 0.0)
+            qd = J.T @ np.linalg.solve(J @ J.T + lam ** 2 * np.eye(6), np.r_[v, w])
+            peak = float(np.max(np.abs(qd)))
+            if peak > r["qd_max"]:
+                qd *= r["qd_max"] / peak
+            worst = max(worst, min(peak, r["qd_max"]))
+            q = q + qd * dt
+            if np.any(q < lim[0]) or np.any(q > lim[1]):
+                return None, "joint limit"
+            qs.append(q.copy())
+            err = float(np.linalg.norm(self.robot.fkine(q).t - T_goal.t))
+            if k >= n and err < r["tol"] / 4:
+                break
+        if err > r["tol"]:
+            return None, f"ended {err * 1000:.1f} mm off"
+        return np.array(qs), (f"{len(qs)} steps, peak joint speed {worst:.2f} rad/s, "
+                              f"min manipulability {min_m:.3f}, error {err * 1000:.2f} mm")
 
     def move_to(self, q_goal):
         qs = self.plan(q_goal)

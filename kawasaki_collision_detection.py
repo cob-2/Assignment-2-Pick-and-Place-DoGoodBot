@@ -5,6 +5,9 @@ import numpy as np
 from spatialmath import SE3
 from roboticstoolbox import jtraj
 
+from cobotta_collision_detection import (self_contacts,  # shared self-collision test
+                                         structural_self_pairs)
+
 
 # ============================================================================
 # CONFIG
@@ -20,6 +23,8 @@ CONFIG = dict(
     check_every=2,          # check every n-th step of a path
     reach=1.30,             # ignore scene objects further than this from the base (m)
     skip_groups=("room", "markers"),
+    self_shrink=0.85,       # link capsules are this fraction of the ellipsoid
+    self_apart=4,           # links this far apart in the chain are tested
     stand_on_tol=0.012,     # objects whose top is this close to the base height are what the arm stands on
     rmrc_speed=0.10,        # TCP speed for straight moves into / out of a slot (m/s)
     rmrc_dt=0.03,           # RMRC time step (s)
@@ -159,6 +164,10 @@ def spec_box(spec):
     if spec["type"] == "sphere":
         r = spec["radius"]
         return (2 * r, 2 * r, 2 * r), pose
+    if spec["type"] == "mesh" and spec.get("size") is not None:
+        centre = spec.get("box_xyz", spec["xyz"])
+        return (tuple(spec["size"]),
+                SE3(*centre) * SE3.RPY(list(spec.get("rpy", (0, 0, 0)))))
     return None, None
 
 
@@ -240,9 +249,13 @@ def carried_boxes(robot, q, carried):
 # COLLISION QUERIES
 # ============================================================================
 def contacts(robot, world, q, carried=(), opening=None):
-    """Set of 'part/obstacle' pairs that touch at joint angles q."""
-    found = set()
-    for idx, label, centre, R, radii in arm_ellipsoids(robot, q, opening):
+    """Set of 'part/obstacle' pairs that touch at joint angles q, plus any
+    'partA~partB' pair where the arm has folded into itself."""
+    items = arm_ellipsoids(robot, q, opening)
+    ignore = structural_self_pairs(robot, lambda qq: arm_ellipsoids(robot, qq, opening),
+                                   CONFIG["self_shrink"], CONFIG["self_apart"])
+    found = self_contacts(items, CONFIG["self_shrink"], CONFIG["self_apart"]) - ignore
+    for idx, label, centre, R, radii in items:
         reach = float(radii.max())
         for ob in world.obstacles:
             if not ob.active or idx in ob.ignore_links or not ob.near(centre, reach):

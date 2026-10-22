@@ -4,6 +4,8 @@ from roboticstoolbox import jtraj
 
 import kawasaki_collision_detection as kcd
 from kawasaki_collision_detection import E, RG2_ELLIPSOIDS, World, spec_box  # noqa: F401  (re-exported)
+from cobotta_collision_detection import (self_contacts,  # shared self-collision test
+                                         structural_self_pairs)
 
 
 # ============================================================================
@@ -17,6 +19,8 @@ CONFIG = dict(
     carry_margin=0.003,     # clearance around a carried box
     steps=40,               # jtraj steps when planning a move
     check_every=2,          # check every n-th step of a path
+    self_shrink=0.85,       # link capsules are this fraction of the ellipsoid
+    self_apart=4,           # links this far apart in the chain are tested
 )
 
 
@@ -110,9 +114,13 @@ def carried_boxes(robot, q, carried):
 # COLLISION QUERIES
 # ============================================================================
 def contacts(robot, world, q, carried=(), opening=None):
-    """Set of 'part/obstacle' pairs that touch at joint angles q."""
-    found = set()
-    for idx, label, centre, R, radii in arm_ellipsoids(robot, q, opening):
+    """Set of 'part/obstacle' pairs that touch at joint angles q, plus any
+    'partA~partB' pair where the arm has folded into itself."""
+    items = arm_ellipsoids(robot, q, opening)
+    ignore = structural_self_pairs(robot, lambda qq: arm_ellipsoids(robot, qq, opening),
+                                   CONFIG["self_shrink"], CONFIG["self_apart"])
+    found = self_contacts(items, CONFIG["self_shrink"], CONFIG["self_apart"]) - ignore
+    for idx, label, centre, R, radii in items:
         reach = float(radii.max())
         for ob in world.obstacles:
             if not ob.active or idx in ob.ignore_links or not ob.near(centre, reach):
