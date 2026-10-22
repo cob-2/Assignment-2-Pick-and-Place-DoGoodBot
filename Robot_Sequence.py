@@ -484,6 +484,69 @@ class ManualOverride:
 
 
 # ----------------------------------------------------------------------------
+# LIVE OBJECT MOVER
+# ----------------------------------------------------------------------------
+MOVER = dict(span=400, step=5)
+
+
+class ObjectMover:
+    """Pick any object in the cell from the panel and nudge it on X, Y and Z while
+    the simulation is running. Moving an object has to touch three things at once -
+    the shape Swift draws, the point cloud the collision checker tests, and the
+    snapshot RESTART SCENE restores - and task.move_object does all three."""
+
+    def __init__(self, task):
+        self.task = task
+        self.names = sorted(task.shapes)
+        self.name = self.names[0] if self.names else None
+        self.sliders = []
+        self.readout = None
+
+    def build(self):
+        env = self.task.env
+        if not self.names:
+            return
+        self.readout = swift.Label(desc="Object mover idle")
+        env.add(self.readout)
+        env.add(swift.Select(self.choose, desc="Move object", options=self.names, value=0))
+        for axis in "XYZ":
+            sl = swift.Slider(self.nudge(len(self.sliders)), min=-MOVER["span"],
+                              max=MOVER["span"], step=MOVER["step"], value=0,
+                              desc=f"Offset {axis}", unit="mm")
+            env.add(sl)
+            self.sliders.append(sl)
+        self.report()
+
+    def choose(self, index):
+        self.name = self.names[int(index)]
+        for sl in self.sliders:
+            sl.value = 0.0
+        self.report()
+
+    def nudge(self, axis):
+        def cb(value):
+            if self.name is None:
+                return
+            base = self.task.start_poses[self.name]
+            off = [0.0, 0.0, 0.0]
+            off[axis] = float(value) / 1000.0
+            for k, sl in enumerate(self.sliders):
+                if k != axis:
+                    off[k] = float(sl.value) / 1000.0
+            self.task.move_object(self.name, tuple(np.asarray(base.t) + np.asarray(off)),
+                                  keep=False)
+            self.report()
+        return cb
+
+    def report(self):
+        if self.readout is None or self.name is None:
+            return
+        t = SE3(self.task.shapes[self.name].T).t
+        self.readout.desc = (f"{self.name} at [{t[0]:+.3f} {t[1]:+.3f} {t[2]:+.3f}] m "
+                             f"- offsets are from its start pose, RESTART SCENE puts it back")
+
+
+# ----------------------------------------------------------------------------
 # THE ARM'S HAND
 # ----------------------------------------------------------------------------
 class Hand:
@@ -608,6 +671,7 @@ class PackagingTask:
         if not headless:
             self.guard.build(self.env)
         self.pendant = ManualOverride(self)
+        self.mover = ObjectMover(self)
         if not headless:
             self.add_panel()
         self.env.step(0.0)
@@ -708,6 +772,25 @@ class PackagingTask:
             if inside and floor - tol <= base <= floor + window:
                 out.append(ob.name)
         return out
+
+    def move_object(self, name, xyz=None, rpy=None, keep=False):
+        """Move one object. The drawn shape and the collision obstacle are separate
+        objects, so both are set here - updating only one is how they silently drift
+        apart. keep=True also rewrites the RESTART SCENE snapshot."""
+        pose = SE3(self.shapes[name].T) if xyz is None else SE3(*xyz)
+        if rpy is not None:
+            pose = pose * SE3.RPY(list(rpy))
+        self.shapes[name].T = pose.A
+        try:
+            self.world.get(name).pose = pose
+        except StopIteration:
+            pass
+        if keep:
+            self.start_poses[name] = pose
+        if self.view is not None:
+            self.view.update()
+        self.env.step(0.0)
+        return pose
 
     def jaw_links(self):
         return (self.robot.n + 1,)        # the jaw pads' index in arm_ellipsoids
@@ -866,6 +949,7 @@ class PackagingTask:
         self.env.add(swift.Button(remove_obstacle, desc="REMOVE OBSTACLE"))
         self.env.add(swift.Button(override, desc="COBOTTA MANUAL OVERRIDE"))
         self.pendant.build()
+        self.mover.build()
 
     def say(self, text):
         print(f"   {text}")
