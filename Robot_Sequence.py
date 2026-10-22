@@ -1,4 +1,5 @@
 import argparse
+import time
 from math import pi
 
 import numpy as np
@@ -272,24 +273,32 @@ class CollisionView:
 # ----------------------------------------------------------------------------
 # MANUAL OVERRIDE
 # ----------------------------------------------------------------------------
-OVERRIDE = dict(rate=0.80, tick=0.05)
+OVERRIDE = dict(rate=0.80, accel=2.50, tick=0.015, max_step=0.05,
+                settle=0.0015, readout=0.10)
 
 
 class ManualOverride:
     """Joint jogging for the COBOTTA from the Swift panel.
 
     Turning it on hands any card back first, then unlocks one slider per joint.
-    Each tick ramps the arm towards the slider angles and refuses a step that
-    would put a link into something."""
+    Each tick ramps the arm towards the slider angles. A contact does not just
+    refuse that one step - it latches the cell, and nothing moves again until
+    RESTART SCENE is pressed."""
 
     def __init__(self, task):
         self.task = task
         self.on = False
-        self.blocked = False
+        self.latched = False
+        self.held = False
+        self.fault = None
         self.sliders = []
         self.names = []
         self.readout = None
         self.target = np.asarray(task.robot.q, dtype=float).copy()
+        self.vel = np.zeros_like(self.target)
+        self.allowed = ()
+        self.clock = None
+        self.spoke = 0.0
 
     def build(self):
         env, rb = self.task.env, self.task.robot
@@ -308,13 +317,16 @@ class ManualOverride:
 
     def jog(self, i):
         def cb(value):
+            if self.latched or self.held:
+                return
             self.target[i] = float(np.deg2rad(float(value)))
-            self.blocked = False
         return cb
 
     def read_sliders(self):
         """The panel reports a slider two ways - its own callback, and the env.values
         dict. Read both, so a jog lands whichever one the browser sends."""
+        if self.latched or self.held:
+            return
         values = getattr(self.task.env, "values", None)
         if not values:
             return
@@ -325,7 +337,6 @@ class ManualOverride:
             angle = float(np.deg2rad(float(v)))
             if abs(angle - self.target[i]) > 1e-6:
                 self.target[i] = angle
-                self.blocked = False
 
     def sync(self):
         self.target = np.asarray(self.task.robot.q, dtype=float).copy()
@@ -336,49 +347,135 @@ class ManualOverride:
                 values[name] = float(angle)
 
     def enable(self):
+        task = self.task
         self.on = True
-        self.blocked = False
+        self.held = False
+        self.vel[:] = 0.0
+        self.clock = None
         self.sync()
+        # What the arm is legitimately touching as jogging begins - its own base on
+        # the bench, say. Taken once, not every tick: a contact the arm acquires
+        # while jogging has to stop it, not quietly join the allowed list.
+        self.allowed = cell.contacts(task.robot, task.cfg, task.world, task.robot.q)
         self.report("drag a joint slider")
 
     def disable(self):
         self.on = False
-        self.blocked = False
+        self.vel[:] = 0.0
+        self.clock = None
         self.sync()
-        self.report("")
+        if not self.latched:
+            self.report("", force=True)
 
-    def report(self, note):
+    def stop(self, fault):
+        """Latch on contact. The arm is left exactly where it stopped, the sliders
+        go dead, and the console refuses START, RESUME and MANUAL OVERRIDE until
+        RESTART SCENE clears it - a refused step the operator can simply jog
+        around is not a stop."""
+        self.latched = True
+        self.fault = fault
+        self.on = False
+        self.vel[:] = 0.0
+        self.sync()
+        self.task.say("collision detected stopping now - press RESTART SCENE")
+        self.report(fault, force=True)
+
+    def release(self):
+        self.latched = False
+        self.held = False
+        self.fault = None
+
+    def hold(self):
+        """E-STOP pressed while jogging. The arm freezes on the spot and the
+        sliders go dead, exactly as the gate does mid-cycle - the jog is not
+        abandoned, it waits for E-STOP RELEASE and then RESUME."""
+        self.held = True
+        self.vel[:] = 0.0
+        self.clock = None
+        self.sync()
+        self.task.say("E-STOP - jog held. Press E-STOP RELEASE, then RESUME")
+        self.report("held", force=True)
+
+    def resume(self):
+        self.held = False
+        self.clock = None
+        self.sync()
+        self.task.say("Resuming manual override - jog the COBOTTA with the joint sliders")
+        self.report("drag a joint slider", force=True)
+
+    def report(self, note, force=False):
         if self.readout is None:
             return
+        now = time.perf_counter()
+        if not force and now - self.spoke < OVERRIDE["readout"]:
+            return
+        self.spoke = now
         rb = self.task.robot
         T = rb.fkine(rb.q)
         deg = ", ".join(f"{a:.0f}" for a in np.rad2deg(rb.q))
-        head = "MANUAL OVERRIDE" if self.on else "Manual override off"
+        if self.latched:
+            head = "COLLISION - STOPPED, press RESTART SCENE"
+        elif self.held:
+            head = "E-STOP - HELD, press E-STOP RELEASE then RESUME"
+        else:
+            head = "MANUAL OVERRIDE" if self.on else "Manual override off"
         tail = f" - {note}" if note else ""
         self.readout.desc = (f"{head}  J[{deg}] deg   flange "
                              f"[{T.t[0]:+.3f} {T.t[1]:+.3f} {T.t[2]:+.3f}] m{tail}")
 
+    def slice(self):
+        """How long the last tick actually took. The jog integrates real time
+        rather than counting ticks, so the arm travels at `rate` whether the
+        panel manages 50 updates a second or 15. Capped, so a hitch cannot turn
+        into one huge jump the collision test would step straight over."""
+        now = time.perf_counter()
+        last, self.clock = self.clock, now
+        if last is None:
+            return OVERRIDE["tick"]
+        return float(min(max(now - last, 0.0), OVERRIDE["max_step"]))
+
+    def profile(self, err, dt):
+        """Trapezoidal speed. Each joint accelerates at `accel`, cruises at `rate`
+        and brakes into its slider angle - so a jog eases in and eases out instead
+        of snapping to full speed and then stopping dead, which is what made the
+        old fixed-size step look like it was stuttering."""
+        rate, accel = OVERRIDE["rate"], OVERRIDE["accel"]
+        brake = np.sqrt(2.0 * accel * np.abs(err))
+        want = np.clip(err / max(dt, 1e-6), -rate, rate)
+        want = np.clip(want, -brake, brake)
+        dv = accel * dt
+        self.vel = np.clip(want, self.vel - dv, self.vel + dv)
+        step = self.vel * dt
+        # Inside the settle band, close the gap in one go. Otherwise the last
+        # fraction of a degree arrives as a run of uneven twitches, because the
+        # braking limit and the varying tick length fight over it.
+        done = np.abs(err) <= OVERRIDE["settle"]
+        self.vel[done] = 0.0
+        step[done] = err[done]
+        return step
+
     def update(self):
-        if not self.on:
+        if not self.on or self.latched:
             return
         task, rb = self.task, self.task.robot
+        if task.ui.get("estop") and not self.held:
+            self.hold()
+        if self.held:
+            return
         self.read_sliders()
         q = np.asarray(rb.q, dtype=float)
-        span = OVERRIDE["rate"] * OVERRIDE["tick"]
-        step = np.clip(self.target - q, -span, span)
-        if float(np.max(np.abs(step))) < 1e-5:
+        err = self.target - q
+        dt = self.slice()
+        if float(np.max(np.abs(err))) < 1e-4 and not np.any(self.vel):
+            return
+        step = self.profile(err, dt)
+        if float(np.max(np.abs(step))) < 1e-7:
             return
         goal = q + step
-        allowed = cell.contacts(rb, task.cfg, task.world, q)
-        hit = cell.first_collision(rb, task.cfg, task.world, goal, allowed)
+        hit = cell.first_collision(rb, task.cfg, task.world, goal, self.allowed)
         if hit is not None:
-            if not self.blocked:
-                self.blocked = True
-                self.sync()
-                task.say("collision detected stopping now")
-                self.report(hit)
+            self.stop(hit)
             return
-        self.blocked = False
         rb.q = goal
         task.ctrl.refresh()
         if task.view is not None:
@@ -930,16 +1027,23 @@ class PackagingTask:
     def console(self):
         self.say("Ready - choose a card and press START")
         while True:
-            self.env.step(0.05)
-            if self.ui.get("override") and not self.pendant.on:
+            self.env.step(OVERRIDE["tick"] if self.pendant.on else 0.05)
+            if self.ui.get("override") and not self.pendant.on and not self.pendant.latched:
                 self.enter_override()
             self.pendant.update()
             req = self.ui.get("request")
             if req is None:
                 continue
             self.ui["request"] = None
+            if self.pendant.latched and req != "restart":
+                self.say(f"collision detected ({self.pendant.fault}) - "
+                         f"system stopped, press RESTART SCENE")
+                continue
             if self.ui["estop"]:
                 self.say("E-STOP latched - press E-STOP RELEASE")
+                continue
+            if req == "resume" and self.pendant.held:
+                self.pendant.resume()
                 continue
             if req == "resume":
                 self.say("Nothing is running - choose a card and press START")
@@ -984,8 +1088,9 @@ class PackagingTask:
         except Exception:
             ok = False
         if not ok and self.ctrl.carried:
-            self.say("collision detected stopping now")
             self.ctrl.carried.clear()
+            self.pendant.stop("the card could not be returned")
+            return
         self.pendant.enable()
         self.say("MANUAL OVERRIDE on - jog the COBOTTA with the joint sliders")
 
@@ -995,6 +1100,7 @@ class PackagingTask:
         self.ui["override"] = False
         self.gate.watch_override = True
         if self.pendant is not None:
+            self.pendant.release()
             self.pendant.disable()
         self.say("Scene restarted - choose a card and press START")
 

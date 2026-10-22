@@ -240,6 +240,23 @@ class World:
     def __init__(self, spacing):
         self.obstacles = []
         self.spacing = spacing
+        self._frames_key = None
+        self._frames = None
+
+    def frames(self):
+        """Centre, rotation and half-extents of every active obstacle, as three
+        stacked arrays. Reading those off a hundred separate SE3 objects costs
+        more than the collision arithmetic does, so they are built once and kept
+        until something actually moves or is switched off."""
+        act = [ob for ob in self.obstacles if ob.active]
+        key = b"".join(ob.pose.A.tobytes() for ob in act) + bytes(len(act))
+        if key != self._frames_key:
+            self._frames = (act,
+                            np.array([ob.pose.t for ob in act], dtype=float),
+                            np.array([ob.pose.R for ob in act], dtype=float),
+                            np.array([ob.half for ob in act], dtype=float))
+            self._frames_key = key
+        return self._frames
 
     def add_box(self, name, size, pose, ignore_links=()):
         ob = Obstacle(name, size, pose, self.spacing, ignore_links)
@@ -344,28 +361,54 @@ def structural_self_pairs(robot, ellipsoids, shrink=0.85, apart=2, samples=150):
     return cached
 
 
-def contacts(robot, cfg, world, q):
+def near_obstacles(world, centre, reach):
+    """The active obstacles whose box comes within `reach` of a point.
+
+    An obstacle is a cloud of a few thousand points, and the cell holds about a
+    hundred of them, so testing every point against every link ellipsoid is
+    millions of operations for a result that is almost always "nothing is close".
+    The exact distance from a point to an oriented box is three lines of
+    arithmetic and is never larger than the distance to that box's cloud, so
+    anything this rejects could not have been hit. Same answer, a fifteenth of
+    the work."""
+    act, centres, rots, halfs = world.frames()
+    if not act:
+        return []
+    local = np.abs(np.einsum("nj,njk->nk", centre - centres, rots))
+    gap = np.clip(local - halfs, 0.0, None)
+    near = np.linalg.norm(gap, axis=1) <= reach
+    return [act[k] for k in np.nonzero(near)[0]]
+
+
+def contacts(robot, cfg, world, q, skip=()):
     items = arm_ellipsoids(robot, cfg, q)
     sc = cfg.get("self_check", CONFIG["self_check"])
     ignore = structural_self_pairs(robot, lambda qq: arm_ellipsoids(robot, cfg, qq),
                                    sc["shrink"], sc["apart"], sc["samples"])
     found = self_contacts(items, sc["shrink"], sc["apart"]) - ignore
     for idx, centre, R, radii in items:
-        for ob in world.obstacles:
-            if not ob.active or idx in ob.ignore_links:
+        reach = float(np.max(radii))
+        for ob in near_obstacles(world, centre, reach):
+            name = f"link{idx}/{ob.name}"
+            if idx in ob.ignore_links or name in skip:
                 continue
-            far = np.max(radii) + np.linalg.norm(ob.half)                
-            if np.linalg.norm(ob.pose.t - centre) > far:                 
-                continue                                                 
-            rel = (ob.points() - centre) @ R
+            pts = ob.points()
+            close = pts[np.all(np.abs(pts - centre) <= reach, axis=1)]
+            if close.size == 0:
+                continue
+            rel = (close - centre) @ R
             d = np.sum((rel / radii) ** 2, axis=1)
             if np.any(d < 1.0):
-                found.add(f"link{idx}/{ob.name}")
+                found.add(name)
     return found
 
 
 def first_collision(robot, cfg, world, q, allowed=()):
-    new = contacts(robot, cfg, world, q) - set(allowed)
+    # A pair already on the allowed list is subtracted from the answer either way,
+    # so it is not tested at all - which is what skips the heavy clouds the arm
+    # permanently sits against, such as its own base plate in the holder walls.
+    allowed = set(allowed)
+    new = contacts(robot, cfg, world, q, skip=allowed) - allowed
     return sorted(new)[0] if new else None
 
 
