@@ -65,11 +65,6 @@ class RS007N(DHRobot3D):
         alpha  = [pi/2,   pi,    -pi/2,  pi/2,  -pi/2,  0.0]
         offset = [-pi/2,  pi/2,  -pi/2,  0.0,   0.0,    0.0]
         flip   = [False,  False, False,  False, False,  False]
-        # No 'flip': roboticstoolbox 1.3.x handles flip=True wrongly (its IK and fkine
-        # disagree). Without it the arm reaches exactly the same poses, but the model's
-        # joint 1 angle has the opposite sign to the real controller's JT1 (q1 = -JT1).
-        # Datasheet motion range (deg): JT1 ±180, JT2 ±135, JT3 ±155,
-        #                               JT4 ±200, JT5 ±125, JT6 ±360
         lim = [180, 135, 155, 200, 125, 360]
         qlim = [[-radians(l), radians(l)] for l in lim]
 

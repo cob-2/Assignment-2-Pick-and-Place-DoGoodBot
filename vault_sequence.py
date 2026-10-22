@@ -1,18 +1,3 @@
-"""Arm A (Kawasaki RS007N + RG2) vault task: fetch a card from the stands for the
-COBOTTA, and put a rejected card back in its slot.
-
-    vault = VaultArm(env, robot, shapes, gate)        # robot = the Kawasaki from the scene
-    vault.fetch("card_c1r2")      # stand -> hand-off holder
-    vault.put_back("card_c1r2")   # Return mount -> its original slot
-
-Every move is checked with kawasaki_collision_detection (scene point cloud vs the
-arm's fitted ellipsoids). The carried card is checked as a box, and the COBOTTA's
-own link ellipsoids are added to the Kawasaki's world, so the two arms can't
-run into each other at the shared hand-off holder.
-Moves into and out of a groove are straight lines; the longer moves are joint
-paths, re-planned through a via pose if the direct path is blocked.
-"""
-
 import numpy as np
 from math import pi
 from spatialmath import SE3

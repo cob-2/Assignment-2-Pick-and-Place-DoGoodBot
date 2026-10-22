@@ -34,16 +34,7 @@ CONFIG = dict(
     rmrc_tol=0.001,         # final TCP position error accepted (m)
 )
 
-
-# ============================================================================
 # ELLIPSOIDS FITTED TO THE MESHES
-# ============================================================================
-# Each entry: (centre, R, radii) in the frame of the part.
-#   - LINK_ELLIPSOIDS[i] are in DH frame i (frame 0 = robot base), the same frame
-#     ir_support's DHRobot3D uses to place mesh RS007N_J{i}.
-#   - RG2_ELLIPSOIDS are in each RG2 part's own frame: "base" in the flange frame,
-#     the knuckles and fingers in the frames from RS007N._rg2_link_poses().
-# R's columns are the ellipsoid axes, radii are the semi-axis lengths (m).
 def E(centre, R, radii):
     R = np.array(R, dtype=float)
     U, _, Vt = np.linalg.svd(R)          # re-orthonormalise after rounding
@@ -76,10 +67,7 @@ RG2_ELLIPSOIDS = {
 
 GRIPPER_LINK = 7     # link index used for the RG2 when an obstacle lists ignore_links
 
-
-# ============================================================================
 # SCENE POINT CLOUD
-# ============================================================================
 def surface_points(size, spacing):
     hx, hy, hz = np.asarray(size, dtype=float) / 2
 
@@ -191,10 +179,7 @@ def world_from_scene(cfg, arm=ARM, spacing=None, include_cards=True, extra=()):
         world.add_box(spec["name"], size, pose, (0, 1) if under_arm else ())
     return world
 
-
-# ============================================================================
 # ARM ELLIPSOIDS
-# ============================================================================
 def link_frames(robot, q):
     """World pose of DH frame 0..n (frame 0 = base) as 4x4 arrays."""
     if hasattr(robot, "_get_transforms"):                 # ir_support DHRobot3D
@@ -244,13 +229,8 @@ def carried_boxes(robot, q, carried):
                     np.asarray(size, dtype=float) / 2 + CONFIG["carry_margin"]))
     return out
 
-
-# ============================================================================
 # COLLISION QUERIES
-# ============================================================================
 def contacts(robot, world, q, carried=(), opening=None):
-    """Set of 'part/obstacle' pairs that touch at joint angles q, plus any
-    'partA~partB' pair where the arm has folded into itself."""
     items = arm_ellipsoids(robot, q, opening)
     ignore = structural_self_pairs(robot, lambda qq: arm_ellipsoids(robot, qq, opening),
                                    CONFIG["self_shrink"], CONFIG["self_apart"])
@@ -376,10 +356,7 @@ def straight_path(robot, T_goal, q_start=None, steps=15, seeds=(), verbose=False
         print(f"       RMRC: {report}")
     return qs
 
-
-# ============================================================================
 # SELF-TEST
-# ============================================================================
 def load_robot(cfg, arm=ARM):
     spec = cfg.ROBOTS[arm]
     module_name, class_name = spec["loader"].split(":")
