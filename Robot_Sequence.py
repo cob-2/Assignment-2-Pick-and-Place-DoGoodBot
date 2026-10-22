@@ -265,8 +265,8 @@ class ManualOverride:
             slider = swift.Slider(self.jog(i), min=float(np.floor(lo)),
                                   max=float(np.ceil(hi)), step=1.0,
                                   value=float(np.rad2deg(self.target[i])),
-                                  desc=f"COBOTTA J{i + 1}", unit="&#176;", precision=0)
-            env.add(slider, name=name)
+                                  desc=f"COBOTTA J{i + 1}", unit="&#176;")
+            env.add(slider)
             self.sliders.append(slider)
             self.names.append(name)
 

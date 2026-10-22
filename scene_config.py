@@ -145,7 +145,7 @@ STATIC = [
 
 
     dict(name="camera_body", group="inspect", type="mesh", filename=CAM["mesh"],
-         size=CAM["body"], rpy=(0, 0, pi / 2),
+         size=CAM["body"], rpy=(0, 0, -pi / 2),
          xyz=(INSPECT_XY[0], INSPECT_XY[1] - CAM["standoff"], BENCH_H),
          box_xyz=(INSPECT_XY[0], INSPECT_XY[1] - CAM["standoff"],
                   BENCH_H + CAM["body"][2] / 2),

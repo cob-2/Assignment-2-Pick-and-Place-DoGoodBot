@@ -308,13 +308,6 @@ def ellipsoid_overlap(a, b, shrink=1.0):
 
 
 def self_contacts(items, shrink=1.0, apart=2):
-    """The arm against itself. `items` are (idx, [label,] centre, R, radii) tuples as
-    any of the three arm_ellipsoids functions returns them. Every pair at least
-    `apart` links apart in the chain is tested - neighbours are skipped because they
-    always meet at a joint. Pairs that overlap in every pose are structural rather
-    than a fault and are removed by structural_self_pairs below.
-
-    Returns a set of 'partA~partB' strings."""
     parts = []
     for it in items:
         label = it[1] if isinstance(it[1], str) else f"link{it[0]}"
@@ -324,6 +317,8 @@ def self_contacts(items, shrink=1.0, apart=2):
         for j in range(i + 1, len(parts)):
             if abs(parts[i][0] - parts[j][0]) < apart:
                 continue
+            reach = (parts[i][4].max() + parts[j][4].max()) * shrink 
+            if np.linalg.norm(parts[i][2] - parts[j][2]) > reach:                        continue                                                 
             if ellipsoid_overlap(parts[i][2:], parts[j][2:], shrink):
                 found.add(f"{parts[i][1]}~{parts[j][1]}")
     return found
@@ -359,6 +354,9 @@ def contacts(robot, cfg, world, q):
         for ob in world.obstacles:
             if not ob.active or idx in ob.ignore_links:
                 continue
+            far = np.max(radii) + np.linalg.norm(ob.half)                
+            if np.linalg.norm(ob.pose.t - centre) > far:                 
+                continue                                                 
             rel = (ob.points() - centre) @ R
             d = np.sum((rel / radii) ** 2, axis=1)
             if np.any(d < 1.0):
