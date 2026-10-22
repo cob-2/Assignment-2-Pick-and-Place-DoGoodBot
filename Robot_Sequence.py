@@ -13,6 +13,7 @@ import vault_sequence as vault
 import ur3e_outfeed as outfeed
 import kawasaki_collision_detection as kcd
 import ur3e_collision_detection as ucd
+from obstacle_guard import ObstacleGuard
 
 
 # ----------------------------------------------------------------------------
@@ -65,11 +66,16 @@ class StopGate:
         self.view = None
         self.watch_override = True
         self.say = print
+        self.guard = None
 
     def step(self, dt=0.0):
         if self.view is not None:
             self.view.update()
         self.env.step(dt)
+        if self.guard is not None:
+            hit = self.guard.check()
+            if hit is not None:
+                self.blocked(hit)
         if self.ui.get("estop"):
             self.hold()
         if self.watch_override and self.ui.get("override"):
@@ -99,6 +105,36 @@ class StopGate:
             if self.ui.get("request") == "resume":
                 self.ui["request"] = None
                 self.say("Resuming from where it stopped")
+                return
+
+    def blocked(self, hit):
+        """A foreign object is in an arm's way. Freeze every arm where it is until the
+        obstacle is removed and RESUME is pressed, then confirm the path is clear."""
+        arm, part, when = hit
+        where = "at" if when == "now" else "heading into"
+        self.say(f"OBSTACLE - {arm} stopped, {part} {where} the foreign object. "
+                 "Press REMOVE OBSTACLE, then RESUME")
+        while True:
+            self.env.step(0.05)
+            if self.view is not None:
+                self.view.update()
+            if self.watch_override and self.ui.get("override"):
+                raise Override
+            if self.ui.get("request") == "restart":
+                self.ui["request"] = None
+                raise Restart
+            if self.ui.get("request") != "resume":
+                continue
+            self.ui["request"] = None
+            if self.ui.get("estop"):
+                self.say("E-STOP latched - press E-STOP RELEASE, then RESUME")
+                continue
+            if self.guard.present:
+                self.say("Obstacle still in the cell - press REMOVE OBSTACLE, then RESUME")
+                continue
+            self.guard.settle()
+            if self.guard.check() is None:
+                self.say("Obstacle removed, path confirmed clear - resuming")
                 return
 
 
@@ -429,7 +465,7 @@ def spot_poses(spot):
 # ----------------------------------------------------------------------------
 # THE CELL
 # ----------------------------------------------------------------------------
-class   PackagingTask:
+class PackagingTask:
     def __init__(self):
         self.env = swift.Swift()
         self.cfg = checker_cfg()
@@ -470,6 +506,10 @@ class   PackagingTask:
                         if ur3e is not None else None)
         self.view = CollisionView(self.env, self)
         self.gate.view = self.view
+        self.guard = ObstacleGuard(self)
+        self.gate.guard = self.guard
+        if not headless:
+            self.guard.build(self.env)
         self.pendant = ManualOverride(self)
         if not headless:
             self.add_panel()
@@ -574,7 +614,7 @@ class   PackagingTask:
 
     def jaw_links(self):
         return (self.robot.n + 1,)        # the jaw pads' index in arm_ellipsoids
- 
+
     def ik_line(self, T_goal, steps=12):
         T0 = self.robot.fkine(self.robot.q)
         qs, q = [], self.robot.q.copy()
@@ -615,7 +655,7 @@ class   PackagingTask:
                 return True
             print(f"    straight move blocked at step {k} ({hit}) - planning around")
         return self.ctrl.move_to_pose(T_goal)
- 
+
     def pick(self, name, spot, grip=None, width=None):
         ctrl, s = self.ctrl, spot
         grip = grip or name
@@ -684,6 +724,17 @@ class   PackagingTask:
         def view_toggle(_):
             self.say("collision boxes on" if self.view.toggle() else "collision boxes off")
 
+        def drop_obstacle(_):
+            self.guard.drop()
+            self.say("Foreign object in the cell - any arm that reaches it will stop")
+
+        def remove_obstacle(_):
+            if not self.guard.present:
+                self.say("No obstacle in the cell")
+                return
+            self.guard.remove()
+            self.say("Obstacle removed - press RESUME to confirm clear and carry on")
+
         def override(_):
             if self.ui.get("override"):
                 self.ui["override"] = False
@@ -692,7 +743,7 @@ class   PackagingTask:
                 self.say("Manual override off - press RESTART SCENE before a new cycle")
             else:
                 self.ui["override"] = True
- 
+
         self.status = swift.Label(desc="Starting up")
         self.env.add(self.status)
         if self.vault is not None:
@@ -714,9 +765,11 @@ class   PackagingTask:
         self.env.add(swift.Button(request("resume"), desc="RESUME"))
         self.env.add(swift.Button(request("restart"), desc="RESTART SCENE"))
         self.env.add(swift.Button(view_toggle, desc="COLLISION BOXES"))
+        self.env.add(swift.Button(drop_obstacle, desc="DROP OBSTACLE"))
+        self.env.add(swift.Button(remove_obstacle, desc="REMOVE OBSTACLE"))
         self.env.add(swift.Button(override, desc="COBOTTA MANUAL OVERRIDE"))
         self.pendant.build()
- 
+
     def say(self, text):
         print(f"   {text}")
         if getattr(self, "status", None) is not None:
@@ -870,6 +923,7 @@ class   PackagingTask:
             self.vault.reset()
         if self.outfeed is not None:
             self.outfeed.reset()
+        self.guard.remove()
         self.ctrl.refresh()
         self.env.step(0.0)
 
