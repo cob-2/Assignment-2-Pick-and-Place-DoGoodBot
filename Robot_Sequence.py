@@ -16,6 +16,7 @@ import kawasaki_collision_detection as kcd
 import ur3e_collision_detection as ucd
 from obstacle_guard import ObstacleGuard
 from stack_light import StackLight
+from ellipsoid_mesh import ellipsoid_shape
 
 
 # ----------------------------------------------------------------------------
@@ -213,9 +214,6 @@ class CollisionView:
         return False
 
     def build(self):
-        if not hasattr(geometry, "Ellipsoid"):
-            raise RuntimeError("spatialgeometry is too old to draw ellipsoids - "
-                               "run: pip install -U spatialgeometry")
         envelope = self.envelope()
         for ob in self.task.world.obstacles:
             if not self.touches_case(ob) or not self.in_reach(ob, envelope):
@@ -228,7 +226,7 @@ class CollisionView:
             shapes = []
             for item in fn(robot):
                 radii = np.asarray(item[-1], dtype=float)
-                shape = geometry.Ellipsoid(radii=list(radii), color=VIEW["ellipsoid"])
+                shape = ellipsoid_shape(radii, VIEW["ellipsoid"])
                 self.env.add(shape)
                 shapes.append(shape)
             self.arms.append((robot, fn, shapes))
