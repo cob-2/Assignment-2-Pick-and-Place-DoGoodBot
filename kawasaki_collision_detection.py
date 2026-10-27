@@ -293,7 +293,7 @@ def solve_ik(robot, T, seeds, pos_tol=1e-3, rot_tol=np.radians(1.0)):
         q0 = np.asarray(s, dtype=float)
         try:
             sol = robot.ikine_LM(T, q0=q0, joint_limits=True, ilimit=300, slimit=60)
-        except TypeError:                                  # older toolbox keyword names
+        except TypeError:                                  
             sol = robot.ikine_LM(T, q0=q0)
         if not getattr(sol, "success", False):
             continue

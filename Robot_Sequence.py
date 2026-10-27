@@ -15,6 +15,7 @@ import ur3e_outfeed as outfeed
 import kawasaki_collision_detection as kcd
 import ur3e_collision_detection as ucd
 from obstacle_guard import ObstacleGuard
+from stack_light import StackLight
 
 
 # ----------------------------------------------------------------------------
@@ -278,12 +279,7 @@ OVERRIDE = dict(rate=0.80, accel=2.50, tick=0.015, max_step=0.05,
 
 
 class ManualOverride:
-    """Joint jogging for the COBOTTA from the Swift panel.
-
-    Turning it on hands any card back first, then unlocks one slider per joint.
-    Each tick ramps the arm towards the slider angles. A contact does not just
-    refuse that one step - it latches the cell, and nothing moves again until
-    RESTART SCENE is pressed."""
+    """Joint jogging for the COBOTTA from the Swift panel."""
 
     def __init__(self, task):
         self.task = task
@@ -424,10 +420,6 @@ class ManualOverride:
                              f"[{T.t[0]:+.3f} {T.t[1]:+.3f} {T.t[2]:+.3f}] m{tail}")
 
     def slice(self):
-        """How long the last tick actually took. The jog integrates real time
-        rather than counting ticks, so the arm travels at `rate` whether the
-        panel manages 50 updates a second or 15. Capped, so a hitch cannot turn
-        into one huge jump the collision test would step straight over."""
         now = time.perf_counter()
         last, self.clock = self.clock, now
         if last is None:
@@ -435,10 +427,6 @@ class ManualOverride:
         return float(min(max(now - last, 0.0), OVERRIDE["max_step"]))
 
     def profile(self, err, dt):
-        """Trapezoidal speed. Each joint accelerates at `accel`, cruises at `rate`
-        and brakes into its slider angle - so a jog eases in and eases out instead
-        of snapping to full speed and then stopping dead, which is what made the
-        old fixed-size step look like it was stuttering."""
         rate, accel = OVERRIDE["rate"], OVERRIDE["accel"]
         brake = np.sqrt(2.0 * accel * np.abs(err))
         want = np.clip(err / max(dt, 1e-6), -rate, rate)
@@ -490,11 +478,6 @@ MOVER = dict(span=400, step=5)
 
 
 class ObjectMover:
-    """Pick any object in the cell from the panel and nudge it on X, Y and Z while
-    the simulation is running. Moving an object has to touch three things at once -
-    the shape Swift draws, the point cloud the collision checker tests, and the
-    snapshot RESTART SCENE restores - and task.move_object does all three."""
-
     def __init__(self, task):
         self.task = task
         self.names = sorted(task.shapes)
@@ -670,6 +653,9 @@ class PackagingTask:
         self.gate.guard = self.guard
         if not headless:
             self.guard.build(self.env)
+        self.light = StackLight()
+        if not headless:
+            self.light.build(self.env)
         self.pendant = ManualOverride(self)
         self.mover = ObjectMover(self)
         if not headless:
@@ -1137,6 +1123,7 @@ class PackagingTask:
                 continue
             if req == "start":
                 self.ui.update(go=False, reject=False, face="front")
+                self.light.running()
                 try:
                     self.run()
                 except Halt:
@@ -1145,6 +1132,8 @@ class PackagingTask:
                     self.enter_override()
                 except Restart:
                     self.restart()
+                finally:
+                    self.light.idle()
             elif req == "restart":
                 self.restart()
 

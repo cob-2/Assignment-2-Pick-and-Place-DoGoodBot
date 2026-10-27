@@ -340,6 +340,30 @@ def _rack_specs():
 STATIC.extend(_barrier_specs())
 STATIC.extend(_rack_specs())
 
+ESTOP_STAND = dict(xy=(1.17, -0.56), height=1.00, base_r=0.06, post_r=0.025,
+                   box=(0.09, 0.09, 0.07), collar_r=0.022, head_r=0.035, head_h=0.025)
+
+
+def _estop_stand_specs():
+    s = ESTOP_STAND
+    x, y = s["xy"]
+    h, bz = s["height"], s["box"][2]
+    return [
+        dict(name="estop_stand_base", group="safety", type="cylinder",
+             radius=s["base_r"], length=0.02, xyz=(x, y, 0.01), color=C["frame"]),
+        dict(name="estop_stand_post", group="safety", type="cylinder",
+             radius=s["post_r"], length=h, xyz=(x, y, h / 2), color=C["frame"]),
+        dict(name="estop_stand_box", group="safety", type="cuboid",
+             size=s["box"], xyz=(x, y, h + bz / 2), color=C["warn"]),
+        dict(name="estop_stand_collar", group="safety", type="cylinder",
+             radius=s["collar_r"], length=0.015, xyz=(x, y, h + bz + 0.0075), color=C["frame"]),
+        dict(name="estop_stand_head", group="safety", type="cylinder",
+             radius=s["head_r"], length=s["head_h"],
+             xyz=(x, y, h + bz + 0.015 + s["head_h"] / 2), color=C["stop"]),
+    ]
+
+
+STATIC.extend(_estop_stand_specs())
 
 # ----------------------------------------------------------------------------
 # HAND-OFF HOLDER
