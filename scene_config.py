@@ -1,5 +1,3 @@
-"""Card Vault workcell - scene definition. Explained in CODE_GUIDE.md."""
-
 from math import pi, radians
 
 import numpy as np
