@@ -87,10 +87,6 @@ class StopGate:
             self.ui["request"] = None
 
     def hold(self):
-        """E-STOP latched. Freeze the arm exactly where it is and keep the panel
-        alive, so the cycle can pick up from this step instead of being thrown
-        away. Returns once the stop is released and RESUME is pressed; RESTART
-        SCENE and MANUAL OVERRIDE still get out of here."""
         self.say("E-STOP - motion held. Press E-STOP RELEASE, then RESUME")
         while True:
             self.env.step(0.05)
@@ -158,7 +154,8 @@ def checker_cfg():
 # ----------------------------------------------------------------------------
 # COLLISION VIEW
 # ----------------------------------------------------------------------------
-VIEW = dict(box=(0.20, 0.85, 0.95, 0.22), ellipsoid=(1.00, 0.45, 0.10, 0.30),
+VIEW = dict(box=(0.20, 0.85, 0.95, 0.22), ellipsoid=(1.00, 0.45, 0.10, 0.55),
+            arm_alpha=0.20,
             pad=0.120, samples=300, case_slack=0.0, case_tol=0.002,
             parked=SE3(0, 0, -100).A)
 
@@ -215,6 +212,9 @@ class CollisionView:
         return False
 
     def build(self):
+        if not hasattr(geometry, "Ellipsoid"):
+            raise RuntimeError("spatialgeometry is too old to draw ellipsoids - "
+                               "run: pip install -U spatialgeometry")
         envelope = self.envelope()
         for ob in self.task.world.obstacles:
             if not self.touches_case(ob) or not self.in_reach(ob, envelope):
@@ -227,10 +227,7 @@ class CollisionView:
             shapes = []
             for item in fn(robot):
                 radii = np.asarray(item[-1], dtype=float)
-                if hasattr(geometry, "Ellipsoid"):
-                    shape = geometry.Ellipsoid(radii=list(radii), color=VIEW["ellipsoid"])
-                else:                    # older spatialgeometry: the box around the ellipsoid
-                    shape = geometry.Cuboid(scale=list(radii * 2), color=VIEW["ellipsoid"])
+                shape = geometry.Ellipsoid(radii=list(radii), color=VIEW["ellipsoid"])
                 self.env.add(shape)
                 shapes.append(shape)
             self.arms.append((robot, fn, shapes))
@@ -240,9 +237,21 @@ class CollisionView:
         if not self.task.headless:
             shape.set_alpha(value)
 
+    def ghost(self):
+        for robot, _, _ in self.arms:
+            g = getattr(robot, "gripper", None)
+            parts = list(getattr(robot, "links_3d", []))
+            parts += [m for m in (getattr(g, "base", None), getattr(g, "left", None),
+                                  getattr(g, "right", None)) if m is not None]
+            for m in parts:
+                self.alpha(m, VIEW["arm_alpha"] if self.on else 1.0)
+
+    def summary(self):
+        return (f"{sum(len(s) for _, _, s in self.arms)} link ellipsoids, "
+                f"{len(self.boxes)} obstacle boxes")
+
     def place(self):
-        # Swift only re-sends a shape's pose after it is added, not its colour, so a
-        # hidden shape is also parked out of sight rather than relying on opacity alone.
+        # A hidden shape is parked out of sight as well as made transparent.
         for shape, ob in self.boxes:
             shown = self.on and ob.active
             shape.T = ob.pose.A if shown else VIEW["parked"]
@@ -266,6 +275,7 @@ class CollisionView:
             self.build()
         else:
             self.place()
+        self.ghost()
         self.env.step(0.0)
         return self.on
 
@@ -278,12 +288,6 @@ OVERRIDE = dict(rate=0.80, accel=2.50, tick=0.015, max_step=0.05,
 
 
 class ManualOverride:
-    """Joint jogging for the COBOTTA from the Swift panel.
-
-    Turning it on hands any card back first, then unlocks one slider per joint.
-    Each tick ramps the arm towards the slider angles. A contact does not just
-    refuse that one step - it latches the cell, and nothing moves again until
-    RESTART SCENE is pressed."""
 
     def __init__(self, task):
         self.task = task
@@ -323,8 +327,6 @@ class ManualOverride:
         return cb
 
     def read_sliders(self):
-        """The panel reports a slider two ways - its own callback, and the env.values
-        dict. Read both, so a jog lands whichever one the browser sends."""
         if self.latched or self.held:
             return
         values = getattr(self.task.env, "values", None)
@@ -368,10 +370,6 @@ class ManualOverride:
             self.report("", force=True)
 
     def stop(self, fault):
-        """Latch on contact. The arm is left exactly where it stopped, the sliders
-        go dead, and the console refuses START, RESUME and MANUAL OVERRIDE until
-        RESTART SCENE clears it - a refused step the operator can simply jog
-        around is not a stop."""
         self.latched = True
         self.fault = fault
         self.on = False
@@ -386,9 +384,6 @@ class ManualOverride:
         self.fault = None
 
     def hold(self):
-        """E-STOP pressed while jogging. The arm freezes on the spot and the
-        sliders go dead, exactly as the gate does mid-cycle - the jog is not
-        abandoned, it waits for E-STOP RELEASE and then RESUME."""
         self.held = True
         self.vel[:] = 0.0
         self.clock = None
@@ -424,10 +419,6 @@ class ManualOverride:
                              f"[{T.t[0]:+.3f} {T.t[1]:+.3f} {T.t[2]:+.3f}] m{tail}")
 
     def slice(self):
-        """How long the last tick actually took. The jog integrates real time
-        rather than counting ticks, so the arm travels at `rate` whether the
-        panel manages 50 updates a second or 15. Capped, so a hitch cannot turn
-        into one huge jump the collision test would step straight over."""
         now = time.perf_counter()
         last, self.clock = self.clock, now
         if last is None:
@@ -435,10 +426,6 @@ class ManualOverride:
         return float(min(max(now - last, 0.0), OVERRIDE["max_step"]))
 
     def profile(self, err, dt):
-        """Trapezoidal speed. Each joint accelerates at `accel`, cruises at `rate`
-        and brakes into its slider angle - so a jog eases in and eases out instead
-        of snapping to full speed and then stopping dead, which is what made the
-        old fixed-size step look like it was stuttering."""
         rate, accel = OVERRIDE["rate"], OVERRIDE["accel"]
         brake = np.sqrt(2.0 * accel * np.abs(err))
         want = np.clip(err / max(dt, 1e-6), -rate, rate)
@@ -481,69 +468,6 @@ class ManualOverride:
         if task.view is not None:
             task.view.update()
         self.report("jogging")
-
-
-# ----------------------------------------------------------------------------
-# LIVE OBJECT MOVER
-# ----------------------------------------------------------------------------
-MOVER = dict(span=400, step=5)
-
-
-class ObjectMover:
-    """Pick any object in the cell from the panel and nudge it on X, Y and Z while
-    the simulation is running. Moving an object has to touch three things at once -
-    the shape Swift draws, the point cloud the collision checker tests, and the
-    snapshot RESTART SCENE restores - and task.move_object does all three."""
-
-    def __init__(self, task):
-        self.task = task
-        self.names = sorted(task.shapes)
-        self.name = self.names[0] if self.names else None
-        self.sliders = []
-        self.readout = None
-
-    def build(self):
-        env = self.task.env
-        if not self.names:
-            return
-        self.readout = swift.Label(desc="Object mover idle")
-        env.add(self.readout)
-        env.add(swift.Select(self.choose, desc="Move object", options=self.names, value=0))
-        for axis in "XYZ":
-            sl = swift.Slider(self.nudge(len(self.sliders)), min=-MOVER["span"],
-                              max=MOVER["span"], step=MOVER["step"], value=0,
-                              desc=f"Offset {axis}", unit="mm")
-            env.add(sl)
-            self.sliders.append(sl)
-        self.report()
-
-    def choose(self, index):
-        self.name = self.names[int(index)]
-        for sl in self.sliders:
-            sl.value = 0.0
-        self.report()
-
-    def nudge(self, axis):
-        def cb(value):
-            if self.name is None:
-                return
-            base = self.task.start_poses[self.name]
-            off = [0.0, 0.0, 0.0]
-            off[axis] = float(value) / 1000.0
-            for k, sl in enumerate(self.sliders):
-                if k != axis:
-                    off[k] = float(sl.value) / 1000.0
-            self.task.move_object(self.name, tuple(np.asarray(base.t) + np.asarray(off)),
-                                  keep=False)
-            self.report()
-        return cb
-
-    def report(self):
-        if self.readout is None or self.name is None:
-            return
-        t = SE3(self.task.shapes[self.name].T).t
-        self.readout.desc = (f"{self.name} at [{t[0]:+.3f} {t[1]:+.3f} {t[2]:+.3f}] m "
-                             f"- offsets are from its start pose, RESTART SCENE puts it back")
 
 
 # ----------------------------------------------------------------------------
@@ -671,7 +595,6 @@ class PackagingTask:
         if not headless:
             self.guard.build(self.env)
         self.pendant = ManualOverride(self)
-        self.mover = ObjectMover(self)
         if not headless:
             self.add_panel()
         self.env.step(0.0)
@@ -772,25 +695,6 @@ class PackagingTask:
             if inside and floor - tol <= base <= floor + window:
                 out.append(ob.name)
         return out
-
-    def move_object(self, name, xyz=None, rpy=None, keep=False):
-        """Move one object. The drawn shape and the collision obstacle are separate
-        objects, so both are set here - updating only one is how they silently drift
-        apart. keep=True also rewrites the RESTART SCENE snapshot."""
-        pose = SE3(self.shapes[name].T) if xyz is None else SE3(*xyz)
-        if rpy is not None:
-            pose = pose * SE3.RPY(list(rpy))
-        self.shapes[name].T = pose.A
-        try:
-            self.world.get(name).pose = pose
-        except StopIteration:
-            pass
-        if keep:
-            self.start_poses[name] = pose
-        if self.view is not None:
-            self.view.update()
-        self.env.step(0.0)
-        return pose
 
     def jaw_links(self):
         return (self.robot.n + 1,)        # the jaw pads' index in arm_ellipsoids
@@ -902,7 +806,9 @@ class PackagingTask:
             return cb
 
         def view_toggle(_):
-            self.say("collision boxes on" if self.view.toggle() else "collision boxes off")
+            on = self.view.toggle()
+            self.say(f"collision model on - {self.view.summary()}" if on
+                     else "collision model off")
 
         def drop_obstacle(_):
             self.guard.drop()
@@ -944,12 +850,11 @@ class PackagingTask:
         self.env.add(swift.Button(reset, desc="E-STOP RELEASE"))
         self.env.add(swift.Button(request("resume"), desc="RESUME"))
         self.env.add(swift.Button(request("restart"), desc="RESTART SCENE"))
-        self.env.add(swift.Button(view_toggle, desc="COLLISION BOXES"))
+        self.env.add(swift.Button(view_toggle, desc="COLLISION ELLIPSOIDS"))
         self.env.add(swift.Button(drop_obstacle, desc="DROP OBSTACLE"))
         self.env.add(swift.Button(remove_obstacle, desc="REMOVE OBSTACLE"))
         self.env.add(swift.Button(override, desc="COBOTTA MANUAL OVERRIDE"))
         self.pendant.build()
-        self.mover.build()
 
     def say(self, text):
         print(f"   {text}")
@@ -1109,7 +1014,7 @@ class PackagingTask:
         self.env.step(0.0)
 
     def console(self):
-        self.say("Ready - choose a card and press START")
+        self.say("Ready - choose a card and press START") 
         while True:
             self.env.step(OVERRIDE["tick"] if self.pendant.on else 0.05)
             if self.ui.get("override") and not self.pendant.on and not self.pendant.latched:

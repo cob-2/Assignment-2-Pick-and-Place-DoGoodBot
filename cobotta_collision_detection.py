@@ -125,8 +125,7 @@ def E(centre, R, radii):
 
 # One or more oriented ellipsoids per link, each the smallest PCA-aligned ellipsoid
 # that contains every vertex of that link's mesh, measured in the link's own DH
-# frame. Long or bent links are split into 2-3 pieces so the fit stays tight. Same
-# idea and format as kawasaki_collision_detection.LINK_ELLIPSOIDS.
+# frame. Long or bent links are split into 2-3 pieces so the fit stays tight.
 LINK_ELLIPSOIDS = {
     0: [E((-0.0243, +0.0502, +0.0507), ((-0.9923, +0.1131, +0.0499), (+0.0261, -0.2025, +0.9789), (+0.1208, +0.9727, +0.1980)), (0.1228, 0.0957, 0.0195)),
        E((-0.0098, -0.0030, +0.0694), ((-0.9692, +0.0352, -0.2438), (+0.0288, +0.9991, +0.0295), (+0.2446, +0.0216, -0.9694)), (0.1448, 0.0689, 0.0831)),
@@ -244,10 +243,6 @@ class World:
         self._frames = None
 
     def frames(self):
-        """Centre, rotation and half-extents of every active obstacle, as three
-        stacked arrays. Reading those off a hundred separate SE3 objects costs
-        more than the collision arithmetic does, so they are built once and kept
-        until something actually moves or is switched off."""
         act = [ob for ob in self.obstacles if ob.active]
         key = b"".join(ob.pose.A.tobytes() for ob in act) + bytes(len(act))
         if key != self._frames_key:
@@ -312,10 +307,6 @@ _SPHERE = _unit_sphere()
 
 
 def ellipsoid_overlap(a, b, shrink=1.0):
-    """Do two oriented ellipsoids (centre, R, radii) overlap? Points sampled on each
-    surface are tested against the other's inequality, which catches every case
-    except two that interpenetrate without either surface sample landing inside -
-    impossible here, where the radii are all of a similar order."""
     for (c1, R1, r1), (c2, R2, r2) in ((a, b), (b, a)):
         pts = c1 + (_SPHERE * (np.asarray(r1) * shrink)) @ np.asarray(R1).T
         if np.any(np.sum((((pts - c2) @ np.asarray(R2)) / (np.asarray(r2) * shrink)) ** 2,
@@ -342,11 +333,6 @@ def self_contacts(items, shrink=1.0, apart=2):
 
 
 def structural_self_pairs(robot, ellipsoids, shrink=0.85, apart=2, samples=150):
-    """Which capsule pairs overlap in *every* pose. Those are an artefact of the
-    ellipsoid fit - a wrist ellipsoid that always pokes into the gripper base, say -
-    not a fault, so they are subtracted from every self-collision result. Learned
-    once per robot from random configurations and cached on it, rather than
-    hard-coded, so it stays right if anyone re-fits the ellipsoids."""
     cached = getattr(robot, "_structural_self_pairs", None)
     if cached is not None:
         return cached
@@ -362,15 +348,6 @@ def structural_self_pairs(robot, ellipsoids, shrink=0.85, apart=2, samples=150):
 
 
 def near_obstacles(world, centre, reach):
-    """The active obstacles whose box comes within `reach` of a point.
-
-    An obstacle is a cloud of a few thousand points, and the cell holds about a
-    hundred of them, so testing every point against every link ellipsoid is
-    millions of operations for a result that is almost always "nothing is close".
-    The exact distance from a point to an oriented box is three lines of
-    arithmetic and is never larger than the distance to that box's cloud, so
-    anything this rejects could not have been hit. Same answer, a fifteenth of
-    the work."""
     act, centres, rots, halfs = world.frames()
     if not act:
         return []
@@ -483,14 +460,6 @@ class Controller:
         return None
 
     def rmrc(self, T_goal, speed=None):
-        """Resolved-rate motion control of the flange along a straight line to T_goal.
-
-        The TCP follows the line with a quintic profile, so it starts and stops
-        smoothly. Each step takes the gap between where the flange is and where it
-        should be next step as a spatial velocity xd = [v; w], solves
-        qd = J^T (J J^T + lambda^2 I)^-1 xd with lambda > 0 only near a singularity
-        (manipulability below manip_min), caps qd and integrates q += qd dt.
-        Returns (qs, report), or (None, why) if it could not hold the line."""
         r = self.cfg["rmrc"]
         dt = self.cfg["motion"]["dt"]
         speed = r["speed"] if speed is None else speed
