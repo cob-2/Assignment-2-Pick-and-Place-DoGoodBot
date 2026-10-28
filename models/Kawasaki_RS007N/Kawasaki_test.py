@@ -16,7 +16,7 @@ class RS007N(DHRobot3D):
 
     def __init__(self, base=None):
         links = self._create_DH()
-        link3D_names = dict(link0="RS007N_J0",
+        link3D_names = dict(link0="RS007N_J0_white",
                             link1="RS007N_J1",
                             link2="RS007N_J2",
                             link3="RS007N_J3",
