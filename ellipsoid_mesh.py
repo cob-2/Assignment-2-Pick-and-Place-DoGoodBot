@@ -1,10 +1,3 @@
-"""Ellipsoids for the COLLISION BOXES view on any spatialgeometry version.
-
-geometry.Ellipsoid only exists from spatialgeometry 1.4, which does not work with
-the robotics toolbox version this project uses. Every version has Mesh with a
-per-axis scale, so a unit sphere mesh scaled by the three radii is the same
-ellipsoid. The sphere mesh is written once next to this file."""
-
 import os
 
 import numpy as np
